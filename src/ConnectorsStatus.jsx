@@ -1,0 +1,128 @@
+import { useState, useEffect, useCallback } from "react";
+
+const CONNECTOR_LIST = [
+  { id: "jira", label: "JIRA", icon: "J", color: "#0052CC", envHint: "JIRA_URL, JIRA_EMAIL, JIRA_TOKEN" },
+  { id: "slack", label: "Slack", icon: "S", color: "#4A154B", envHint: "SLACK_BOT_TOKEN or SLACK_WEBHOOK_URL" },
+  { id: "whatsapp", label: "WhatsApp", icon: "W", color: "#25D366", envHint: "WHATSAPP_TOKEN, WHATSAPP_PHONE_ID" },
+  { id: "email", label: "Email", icon: "E", color: "#EA4335", envHint: "EMAIL_SMTP_HOST or EMAIL_API_KEY" },
+  { id: "telegram", label: "Telegram", icon: "T", color: "#0088CC", envHint: "TELEGRAM_BOT_TOKEN" },
+];
+
+export default function ConnectorsStatus() {
+  const [status, setStatus] = useState({ jira: false, slack: false, whatsapp: false, email: false, telegram: false });
+  const [open, setOpen] = useState(false);
+  const [jiraTestResult, setJiraTestResult] = useState("");
+  const [jiraTestLoading, setJiraTestLoading] = useState(false);
+
+  const fetchStatus = useCallback(() => {
+    fetch("/api/connectors/status")
+      .then((r) => r.json())
+      .then((data) => setStatus(data))
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => { fetchStatus(); }, [fetchStatus]);
+
+  const testJira = async () => {
+    setJiraTestLoading(true); setJiraTestResult("");
+    try {
+      const r = await fetch("/api/jira-test");
+      const d = await r.json();
+      if (d.ok) setJiraTestResult(`Connected as ${d.user}`);
+      else setJiraTestResult(d.error || "Connection failed");
+    } catch (e) { setJiraTestResult("Server error: " + e.message); }
+    setJiraTestLoading(false);
+  };
+
+  const connectedList = CONNECTOR_LIST.filter((c) => status[c.id]);
+  const connectedCount = connectedList.length;
+  const totalCount = CONNECTOR_LIST.length;
+
+  return (
+    <>
+      <div onClick={() => setOpen(true)} style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", padding: "4px 10px", borderRadius: 10, background: "#0f172a", border: "1px solid #1e293b" }} title="Click to view or enable connectors">
+        <span style={{ fontSize: 11, color: "#64748b", fontWeight: 600, marginRight: 2 }}>Connectors</span>
+        {connectedCount > 0 ? (
+          <>
+            {connectedList.map(({ id, label, color }) => (
+              <div key={id} style={{ display: "flex", alignItems: "center", gap: 4, padding: "3px 7px", borderRadius: 6, background: `${color}22`, border: `1px solid ${color}66`, fontSize: 10, color, fontWeight: 500 }}>
+                <span style={{ width: 5, height: 5, borderRadius: "50%", background: "#22c55e" }} />
+                {label}
+              </div>
+            ))}
+            <span style={{ fontSize: 10, color: "#22c55e", fontWeight: 600 }}>{connectedCount} connected</span>
+          </>
+        ) : (
+          <span style={{ fontSize: 10, color: "#64748b" }}>0 connected</span>
+        )}
+        <span style={{ fontSize: 10, color: "#64748b", marginLeft: 2 }}>· Click to enable others</span>
+      </div>
+
+      {open && (
+        <>
+          <div onClick={() => setOpen(false)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 9998 }} />
+          <div style={{ position: "fixed", top: "50%", left: "50%", transform: "translate(-50%,-50%)", width: 520, maxHeight: "80vh", overflow: "auto", background: "#0f172a", border: "1px solid #1e293b", borderRadius: 16, zIndex: 9999, padding: 28, fontFamily: "'Segoe UI', sans-serif", color: "#e2e8f0" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20 }}>
+              <div style={{ fontSize: 16, fontWeight: 700 }}>Connector Settings</div>
+              <button onClick={() => setOpen(false)} style={{ background: "#1e293b", border: "none", borderRadius: 8, width: 30, height: 30, color: "#94a3b8", fontSize: 18, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>x</button>
+            </div>
+            <div style={{ fontSize: 12, color: "#64748b", marginBottom: 20, lineHeight: 1.6 }}>
+              Connectors are configured via environment variables in your <code style={{ background: "#1e293b", padding: "2px 6px", borderRadius: 4, color: "#93c5fd" }}>.env</code> file. Restart the server after making changes.
+            </div>
+
+            {CONNECTOR_LIST.map(({ id, label, icon, color, envHint }) => (
+              <div key={id} style={{ background: "#1e293b", borderRadius: 12, padding: 16, marginBottom: 12, border: `1px solid ${status[id] ? `${color}44` : "#334155"}` }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+                  <div style={{ width: 28, height: 28, borderRadius: 6, background: `${color}22`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 700, color }}>
+                    {icon}
+                  </div>
+                  <span style={{ fontSize: 14, fontWeight: 600 }}>{label}</span>
+                  <span style={{ marginLeft: "auto", fontSize: 11, fontWeight: 600, color: status[id] ? "#22c55e" : "#f87171", background: status[id] ? "#22c55e18" : "#f8717118", padding: "3px 10px", borderRadius: 12 }}>
+                    {status[id] ? "Linked" : "Not Linked"}
+                  </span>
+                </div>
+                <div style={{ fontSize: 11, color: "#64748b", marginBottom: 6 }}>
+                  Required env vars: <code style={{ background: "#0f172a", padding: "2px 6px", borderRadius: 4, color: "#93c5fd" }}>{envHint}</code>
+                </div>
+                {id === "jira" && (
+                  <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 8 }}>
+                    <button onClick={testJira} disabled={jiraTestLoading || !status.jira} style={{ background: status.jira ? "#0052CC22" : "#1e293b", border: `1px solid ${status.jira ? "#0052CC66" : "#334155"}`, borderRadius: 8, padding: "6px 14px", color: status.jira ? "#0052CC" : "#64748b", fontSize: 11, fontWeight: 600, cursor: status.jira && !jiraTestLoading ? "pointer" : "not-allowed", fontFamily: "inherit" }}>
+                      {jiraTestLoading ? "Testing..." : "Test Connection"}
+                    </button>
+                    {jiraTestResult && (
+                      <span style={{ fontSize: 11, color: jiraTestResult.startsWith("Connected") ? "#22c55e" : "#f87171" }}>
+                        {jiraTestResult}
+                      </span>
+                    )}
+                  </div>
+                )}
+              </div>
+            ))}
+
+            <div style={{ marginTop: 16, padding: 14, background: "#1e293b", borderRadius: 10, border: "1px solid #334155" }}>
+              <div style={{ fontSize: 12, fontWeight: 600, color: "#f59e0b", marginBottom: 6 }}>Example .env configuration</div>
+              <pre style={{ fontSize: 11, color: "#94a3b8", margin: 0, lineHeight: 1.8, fontFamily: "monospace", whiteSpace: "pre-wrap" }}>{`# JIRA
+JIRA_URL=https://yourcompany.atlassian.net
+JIRA_EMAIL=you@company.com
+JIRA_TOKEN=ATATT3x...
+
+# Slack
+SLACK_WEBHOOK_URL=https://hooks.slack.com/services/...
+
+# WhatsApp (Meta Business API)
+WHATSAPP_TOKEN=EAAx...
+WHATSAPP_PHONE_ID=123456789
+
+# Email (SMTP)
+EMAIL_SMTP_HOST=smtp.gmail.com
+EMAIL_API_KEY=your-api-key
+
+# Telegram
+TELEGRAM_BOT_TOKEN=123456789:ABCdefGHI...`}</pre>
+            </div>
+          </div>
+        </>
+      )}
+    </>
+  );
+}

@@ -1,0 +1,1250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>BRDForge — AI-Powered BRD Generator</title>
+  <style>
+    :root {
+      --bg: #0f0f14;
+      --bg2: #16161f;
+      --bg3: #1e1e2a;
+      --bg4: #252535;
+      --border: rgba(120,100,255,0.15);
+      --border2: rgba(120,100,255,0.3);
+      --purple: #7c6fff;
+      --purple-dark: #5a4fe0;
+      --purple-light: #a89fff;
+      --purple-glow: rgba(124,111,255,0.15);
+      --green: #3ecf8e;
+      --green-bg: rgba(62,207,142,0.1);
+      --amber: #f5a623;
+      --amber-bg: rgba(245,166,35,0.1);
+      --red: #ff5f5f;
+      --red-bg: rgba(255,95,95,0.1);
+      --blue: #4fa3e3;
+      --blue-bg: rgba(79,163,227,0.1);
+      --text: #e8e6f0;
+      --text2: #9e9ab0;
+      --text3: #6b6780;
+      --font: 'Inter', 'Segoe UI', system-ui, sans-serif;
+      --mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+      --radius: 10px;
+      --radius-lg: 14px;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: var(--font); background: var(--bg); color: var(--text); min-height: 100vh; font-size: 14px; line-height: 1.6; }
+
+    /* ── HEADER ── */
+    .header {
+      display: flex; align-items: center; gap: 14px;
+      padding: 14px 24px;
+      background: var(--bg2);
+      border-bottom: 1px solid var(--border);
+      position: sticky; top: 0; z-index: 100;
+    }
+    .logo { display: flex; align-items: center; gap: 10px; }
+    .logo-icon {
+      width: 34px; height: 34px; border-radius: 8px;
+      background: linear-gradient(135deg, #7c6fff, #5a4fe0);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 16px; font-weight: 700; color: #fff; letter-spacing: -1px;
+    }
+    .logo-text { font-size: 18px; font-weight: 700; color: var(--text); letter-spacing: -0.5px; }
+    .logo-text span { color: var(--purple-light); }
+    .header-right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+    .model-pill {
+      display: flex; align-items: center; gap: 6px;
+      background: var(--bg3); border: 1px solid var(--border2);
+      border-radius: 20px; padding: 5px 12px; font-size: 12px; color: var(--text2);
+      cursor: pointer; transition: all 0.2s;
+    }
+    .model-pill:hover { border-color: var(--purple); color: var(--text); }
+    .model-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); }
+    .header-btn {
+      padding: 7px 14px; border-radius: var(--radius); font-size: 12px; font-weight: 500;
+      cursor: pointer; border: 1px solid var(--border2); background: transparent;
+      color: var(--text2); transition: all 0.2s; font-family: var(--font);
+    }
+    .header-btn:hover { color: var(--text); border-color: var(--purple); background: var(--purple-glow); }
+    .header-btn.primary { background: var(--purple); border-color: var(--purple); color: #fff; }
+    .header-btn.primary:hover { background: var(--purple-dark); }
+
+    /* ── LAYOUT ── */
+    .layout { display: flex; height: calc(100vh - 57px); }
+
+    /* ── SIDEBAR ── */
+    .sidebar {
+      width: 260px; flex-shrink: 0;
+      background: var(--bg2);
+      border-right: 1px solid var(--border);
+      display: flex; flex-direction: column;
+      overflow: hidden;
+    }
+    .sidebar-section { padding: 14px 16px 8px; }
+    .sidebar-label {
+      font-size: 10px; font-weight: 600; letter-spacing: 0.08em;
+      text-transform: uppercase; color: var(--text3); margin-bottom: 8px;
+    }
+    .new-brd-btn {
+      width: 100%; padding: 9px; border-radius: var(--radius);
+      background: var(--purple); border: none; color: #fff;
+      font-size: 13px; font-weight: 600; cursor: pointer;
+      font-family: var(--font); transition: background 0.2s;
+      display: flex; align-items: center; justify-content: center; gap: 6px;
+    }
+    .new-brd-btn:hover { background: var(--purple-dark); }
+    .history-list { flex: 1; overflow-y: auto; padding: 8px 0; }
+    .history-item {
+      padding: 10px 16px; cursor: pointer;
+      border-left: 2px solid transparent;
+      transition: all 0.15s;
+    }
+    .history-item:hover { background: var(--bg3); }
+    .history-item.active { background: var(--bg3); border-left-color: var(--purple); }
+    .hi-title { font-size: 13px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .hi-meta { font-size: 11px; color: var(--text3); margin-top: 2px; display: flex; gap: 6px; }
+    .hi-domain { color: var(--purple-light); }
+    .empty-history { padding: 20px 16px; font-size: 12px; color: var(--text3); text-align: center; }
+
+    /* ── MAIN ── */
+    .main { flex: 1; overflow-y: auto; display: flex; flex-direction: column; min-width: 0; }
+
+    /* ── TOOLBAR ── */
+    .toolbar {
+      display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+      padding: 10px 24px;
+      background: var(--bg2); border-bottom: 1px solid var(--border);
+      position: sticky; top: 0; z-index: 90;
+    }
+    .toolbar-group { display: flex; align-items: center; gap: 6px; }
+    .tl { font-size: 11px; color: var(--text3); }
+    .toolbar select {
+      background: var(--bg3); border: 1px solid var(--border2);
+      color: var(--text); font-size: 12px; padding: 5px 8px;
+      border-radius: var(--radius); font-family: var(--font); cursor: pointer;
+    }
+    .src-toggle { display: flex; border: 1px solid var(--border2); border-radius: var(--radius); overflow: hidden; }
+    .src-btn {
+      padding: 5px 12px; font-size: 12px; cursor: pointer;
+      background: transparent; color: var(--text3); border: none;
+      font-family: var(--font); transition: all 0.15s;
+    }
+    .src-btn.active { background: var(--purple); color: #fff; }
+    .ask-q-row { display: flex; align-items: center; gap: 7px; margin-left: auto; }
+    .ask-q-row span { font-size: 12px; color: var(--text3); }
+    .toggle { width: 36px; height: 20px; border-radius: 10px; background: var(--bg4); cursor: pointer; position: relative; transition: background 0.2s; border: 1px solid var(--border2); }
+    .toggle.on { background: var(--purple); }
+    .toggle-knob { width: 14px; height: 14px; background: #fff; border-radius: 50%; position: absolute; top: 2px; left: 2px; transition: left 0.2s; }
+    .toggle.on .toggle-knob { left: 18px; }
+
+    /* ── PROGRESS BAR ── */
+    .progress-bar {
+      display: flex; align-items: center; gap: 0;
+      padding: 10px 24px; background: var(--bg2);
+      border-bottom: 1px solid var(--border);
+    }
+    .prog-step { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--text3); padding: 4px 10px; border-radius: var(--radius); transition: all 0.2s; }
+    .prog-step.active { color: var(--purple-light); background: var(--purple-glow); }
+    .prog-step.done { color: var(--green); }
+    .prog-circle { width: 20px; height: 20px; border-radius: 50%; border: 1.5px solid var(--border2); display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 600; flex-shrink: 0; transition: all 0.2s; }
+    .prog-step.active .prog-circle { border-color: var(--purple); color: var(--purple-light); background: var(--purple-glow); }
+    .prog-step.done .prog-circle { border-color: var(--green); color: var(--green); background: var(--green-bg); }
+    .prog-arrow { color: var(--text3); font-size: 11px; padding: 0 4px; }
+
+    /* ── CONTENT ── */
+    .content { flex: 1; padding: 24px; display: flex; flex-direction: column; gap: 20px; max-width: 900px; }
+
+    /* ── CARDS ── */
+    .card {
+      background: var(--bg2); border: 1px solid var(--border);
+      border-radius: var(--radius-lg); padding: 20px 22px;
+      transition: border-color 0.2s;
+    }
+    .card.active-card { border-color: var(--border2); }
+    .card-header { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
+    .card-num {
+      width: 26px; height: 26px; border-radius: 50%; flex-shrink: 0;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 12px; font-weight: 700;
+      background: var(--purple-glow); border: 1px solid var(--border2); color: var(--purple-light);
+    }
+    .card-num.done { background: var(--green-bg); border-color: var(--green); color: var(--green); }
+    .card-title { font-size: 15px; font-weight: 600; color: var(--text); }
+    .card-badge { margin-left: auto; }
+
+    /* ── BADGES ── */
+    .badge { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; padding: 3px 9px; border-radius: 12px; font-weight: 500; }
+    .badge-purple { background: var(--purple-glow); border: 1px solid var(--border2); color: var(--purple-light); }
+    .badge-green { background: var(--green-bg); color: var(--green); }
+    .badge-amber { background: var(--amber-bg); color: var(--amber); }
+    .badge-blue { background: var(--blue-bg); color: var(--blue); }
+    .badge-red { background: var(--red-bg); color: var(--red); }
+
+    /* ── FORM ELEMENTS ── */
+    .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 14px; }
+    .form-group { display: flex; flex-direction: column; gap: 5px; }
+    .form-group label { font-size: 11px; font-weight: 600; color: var(--text3); text-transform: uppercase; letter-spacing: 0.05em; }
+    .form-group input, .form-group textarea, .form-group select {
+      background: var(--bg3); border: 1px solid var(--border2);
+      color: var(--text); font-size: 13px; padding: 9px 11px;
+      border-radius: var(--radius); font-family: var(--font); transition: border-color 0.2s;
+      resize: vertical;
+    }
+    .form-group input:focus, .form-group textarea:focus, .form-group select:focus {
+      outline: none; border-color: var(--purple);
+    }
+    .form-group textarea { min-height: 85px; }
+
+    /* ── JIRA CONNECTOR ── */
+    .jira-connector {
+      background: var(--bg3); border: 1px solid var(--border);
+      border-radius: var(--radius-lg); padding: 18px; margin-bottom: 16px;
+    }
+    .jira-header { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+    .jira-logo {
+      width: 28px; height: 28px; border-radius: 6px;
+      background: linear-gradient(135deg, #0052cc, #2684ff);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 12px; font-weight: 700; color: #fff;
+    }
+    .jira-title { font-size: 14px; font-weight: 600; color: var(--text); }
+    .jira-status { margin-left: auto; font-size: 11px; }
+    .jira-config-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px; }
+    .jira-fetch-row { display: flex; gap: 8px; }
+    .jira-fetch-row input {
+      flex: 1; background: var(--bg4); border: 1px solid var(--border2);
+      color: var(--text); font-size: 13px; padding: 8px 11px;
+      border-radius: var(--radius); font-family: var(--font);
+    }
+    .jira-fetch-row input:focus { outline: none; border-color: var(--blue); }
+    .jira-fetched {
+      background: var(--bg4); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 12px; font-size: 12px;
+      color: var(--text2); margin-top: 10px; display: none;
+    }
+    .jira-fetched.show { display: block; }
+    .jira-field { display: flex; gap: 8px; margin-bottom: 6px; }
+    .jf-label { color: var(--text3); min-width: 110px; font-size: 11px; }
+    .jf-value { color: var(--text); }
+    .jira-help { font-size: 11px; color: var(--text3); margin-top: 8px; padding: 10px; background: var(--bg4); border-radius: var(--radius); border-left: 2px solid var(--blue); }
+
+    /* ── DOMAIN TAGS ── */
+    .tag-row { display: flex; flex-wrap: wrap; gap: 6px; }
+    .tag {
+      padding: 5px 12px; border-radius: 20px; font-size: 12px; cursor: pointer;
+      border: 1px solid var(--border2); background: var(--bg3); color: var(--text2);
+      transition: all 0.15s;
+    }
+    .tag:hover { border-color: var(--purple); color: var(--purple-light); }
+    .tag.selected { background: var(--purple-glow); border-color: var(--purple); color: var(--purple-light); font-weight: 500; }
+
+    /* ── FILE DROP ── */
+    .file-drop {
+      border: 1.5px dashed var(--border2); border-radius: var(--radius);
+      padding: 16px; text-align: center; cursor: pointer;
+      font-size: 13px; color: var(--text3); transition: all 0.2s;
+    }
+    .file-drop:hover { border-color: var(--purple); color: var(--purple-light); background: var(--purple-glow); }
+    .file-tag {
+      display: inline-flex; align-items: center; gap: 6px;
+      background: var(--green-bg); color: var(--green);
+      border-radius: var(--radius); font-size: 12px; padding: 4px 10px; margin: 3px;
+    }
+    .file-tag .rm { cursor: pointer; color: var(--text3); }
+    .file-tag .rm:hover { color: var(--red); }
+
+    /* ── BUTTONS ── */
+    .btn-row { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
+    .btn {
+      padding: 9px 18px; border-radius: var(--radius); font-size: 13px; font-weight: 600;
+      cursor: pointer; border: none; font-family: var(--font); transition: all 0.2s;
+      display: flex; align-items: center; gap: 6px;
+    }
+    .btn-primary { background: var(--purple); color: #fff; }
+    .btn-primary:hover { background: var(--purple-dark); transform: translateY(-1px); }
+    .btn-secondary { background: var(--bg3); color: var(--text2); border: 1px solid var(--border2); }
+    .btn-secondary:hover { color: var(--text); border-color: var(--purple); background: var(--purple-glow); }
+    .btn-jira { background: var(--blue-bg); color: var(--blue); border: 1px solid rgba(79,163,227,0.3); }
+    .btn-jira:hover { background: rgba(79,163,227,0.2); }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+
+    /* ── QUESTIONS ── */
+    .q-item { background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px; margin-bottom: 10px; }
+    .q-label { font-size: 13px; font-weight: 500; color: var(--text); margin-bottom: 8px; }
+    .q-item textarea { width: 100%; background: var(--bg4); border: 1px solid var(--border2); color: var(--text); font-size: 13px; padding: 8px 10px; border-radius: var(--radius); font-family: var(--font); resize: vertical; min-height: 60px; }
+    .q-item textarea:focus { outline: none; border-color: var(--purple); }
+
+    /* ── LOADING ── */
+    .loading-card { display: flex; align-items: center; gap: 14px; padding: 24px; }
+    .spinner { width: 20px; height: 20px; border: 2px solid var(--border2); border-top-color: var(--purple); border-radius: 50%; animation: spin 0.8s linear infinite; flex-shrink: 0; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .loading-text { font-size: 14px; color: var(--text2); }
+    .loading-dots::after { content: ''; animation: dots 1.5s infinite; }
+    @keyframes dots { 0%{content:'.'} 33%{content:'..'} 66%{content:'...'} 100%{content:''} }
+
+    /* ── BRD OUTPUT ── */
+    .brd-output-wrap { }
+    .brd-action-bar { display: flex; gap: 8px; margin-bottom: 16px; align-items: center; flex-wrap: wrap; }
+    .brd-doc { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 28px 32px; }
+    .brd-doc h1 { font-size: 22px; font-weight: 700; color: var(--text); margin-bottom: 6px; }
+    .brd-doc .meta-row { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 24px; padding-bottom: 16px; border-bottom: 1px solid var(--border); }
+    .brd-section-title {
+      font-size: 14px; font-weight: 700; color: var(--purple-light);
+      padding: 6px 0; margin: 20px 0 10px;
+      border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; gap: 8px;
+    }
+    .brd-section-title .sn { font-size: 10px; background: var(--purple-glow); border: 1px solid var(--border2); color: var(--purple-light); padding: 2px 6px; border-radius: 6px; }
+    .brd-p { font-size: 13px; color: var(--text2); margin-bottom: 8px; line-height: 1.7; }
+    .brd-ul { padding-left: 18px; margin-bottom: 8px; }
+    .brd-ul li { font-size: 13px; color: var(--text2); margin-bottom: 4px; }
+    .brd-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-bottom: 12px; }
+    .brd-table th { background: var(--bg3); color: var(--purple-light); padding: 7px 11px; text-align: left; font-weight: 600; border: 1px solid var(--border); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
+    .brd-table td { padding: 7px 11px; border: 1px solid var(--border); color: var(--text2); vertical-align: top; }
+    .brd-table tr:hover td { background: var(--bg3); }
+    .brd-code { background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; font-family: var(--mono); font-size: 12px; color: var(--purple-light); margin-bottom: 10px; white-space: pre-wrap; }
+
+    /* ── SETTINGS MODAL ── */
+    .modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.7); z-index: 1000; align-items: center; justify-content: center; }
+    .modal-overlay.show { display: flex; }
+    .modal { background: var(--bg2); border: 1px solid var(--border2); border-radius: var(--radius-lg); padding: 24px; width: 500px; max-width: 95vw; max-height: 85vh; overflow-y: auto; }
+    .modal h2 { font-size: 17px; font-weight: 700; margin-bottom: 16px; color: var(--text); }
+    .modal-section { margin-bottom: 20px; }
+    .modal-section h3 { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text3); margin-bottom: 10px; }
+    .modal-close { float: right; background: none; border: none; color: var(--text3); font-size: 18px; cursor: pointer; line-height: 1; }
+    .modal-close:hover { color: var(--text); }
+    .setting-row { display: flex; flex-direction: column; gap: 5px; margin-bottom: 12px; }
+    .setting-row label { font-size: 12px; color: var(--text2); }
+    .setting-row input {
+      background: var(--bg3); border: 1px solid var(--border2);
+      color: var(--text); font-size: 13px; padding: 8px 10px;
+      border-radius: var(--radius); font-family: var(--font);
+    }
+    .setting-row input:focus { outline: none; border-color: var(--purple); }
+    .setting-info { font-size: 11px; color: var(--text3); margin-top: 4px; }
+
+    /* ── SCROLLBAR ── */
+    ::-webkit-scrollbar { width: 5px; height: 5px; }
+    ::-webkit-scrollbar-track { background: var(--bg2); }
+    ::-webkit-scrollbar-thumb { background: var(--bg4); border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: var(--border2); }
+
+    /* ── RESPONSIVE ── */
+    @media (max-width: 768px) {
+      .sidebar { display: none; }
+      .form-grid, .jira-config-row { grid-template-columns: 1fr; }
+    }
+
+    /* ── DIVIDER ── */
+    .divider { height: 1px; background: var(--border); margin: 14px 0; }
+
+    .conn-status { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+    .conn-dot { width: 8px; height: 8px; border-radius: 50%; }
+    .conn-dot.ok { background: var(--green); }
+    .conn-dot.err { background: var(--red); }
+    .conn-dot.idle { background: var(--text3); }
+  </style>
+</head>
+<body>
+
+<!-- HEADER -->
+<div class="header">
+  <div class="logo">
+    <div class="logo-icon">BF</div>
+    <div class="logo-text">BRD<span>Forge</span></div>
+  </div>
+  <div id="headerBadge" class="badge badge-purple" style="font-size:11px;">v2.0</div>
+  <div class="header-right">
+    <div class="model-pill" onclick="openSettings()">
+      <div class="model-dot"></div>
+      <span id="modelLabel">Claude Sonnet 4.6</span>
+      <span style="color:var(--text3)">▾</span>
+    </div>
+    <button class="header-btn" onclick="openSettings()">⚙ Settings</button>
+    <button class="header-btn" onclick="exportAll()">↓ Export</button>
+    <button class="header-btn primary" onclick="startNew()">+ New BRD</button>
+  </div>
+</div>
+
+<div class="layout">
+  <!-- SIDEBAR -->
+  <div class="sidebar">
+    <div class="sidebar-section">
+      <div class="sidebar-label">Workspace</div>
+      <button class="new-brd-btn" onclick="startNew()">＋ New BRD</button>
+    </div>
+    <div class="sidebar-section" style="padding-top:16px;">
+      <div class="sidebar-label">History</div>
+    </div>
+    <div class="history-list" id="historyList">
+      <div class="empty-history">No BRDs generated yet</div>
+    </div>
+  </div>
+
+  <!-- MAIN -->
+  <div class="main" id="mainPanel">
+    <div class="toolbar">
+      <div class="toolbar-group">
+        <span class="tl">Model</span>
+        <select id="modelSelect" onchange="updateModel()">
+          <option value="claude-sonnet-4-20250514">Claude Sonnet 4.6</option>
+          <option value="claude-opus-4-20250514">Claude Opus 4.6</option>
+          <option value="claude-haiku-4-5-20251001">Claude Haiku 4.5</option>
+        </select>
+      </div>
+      <div class="toolbar-group">
+        <span class="tl">Context</span>
+        <div class="src-toggle">
+          <button class="src-btn active" id="srcWeb" onclick="setSource('web')">Web</button>
+          <button class="src-btn" id="srcPrev" onclick="setSource('previous')">Previous BRDs</button>
+          <button class="src-btn" id="srcBoth" onclick="setSource('both')">Both</button>
+        </div>
+      </div>
+      <div class="ask-q-row">
+        <span>Ask clarifying questions</span>
+        <div class="toggle on" id="askQToggle" onclick="toggleAskQ()"><div class="toggle-knob"></div></div>
+      </div>
+    </div>
+
+    <!-- PROGRESS -->
+    <div class="progress-bar" id="progressBar">
+      <div class="prog-step active" id="ps1"><div class="prog-circle">1</div>Input</div>
+      <div class="prog-arrow">›</div>
+      <div class="prog-step" id="ps2"><div class="prog-circle">2</div>Gather</div>
+      <div class="prog-arrow">›</div>
+      <div class="prog-step" id="ps3"><div class="prog-circle">3</div>Clarify</div>
+      <div class="prog-arrow">›</div>
+      <div class="prog-step" id="ps4"><div class="prog-circle">4</div>Generate</div>
+      <div class="prog-arrow">›</div>
+      <div class="prog-step" id="ps5"><div class="prog-circle">5</div>Output</div>
+    </div>
+
+    <div class="content" id="content"></div>
+  </div>
+</div>
+
+<!-- SETTINGS MODAL -->
+<div class="modal-overlay" id="settingsModal">
+  <div class="modal">
+    <button class="modal-close" onclick="closeSettings()">×</button>
+    <h2>⚙ BRDForge Settings</h2>
+
+    <div class="modal-section">
+      <h3>Anthropic API</h3>
+      <div class="setting-row">
+        <label>API Key</label>
+        <input type="password" id="cfgAnthropicKey" placeholder="sk-ant-..." />
+        <div class="setting-info">Used for BRD generation. Get from console.anthropic.com</div>
+      </div>
+    </div>
+
+    <div class="modal-section">
+      <h3>JIRA Connector</h3>
+      <div class="setting-row">
+        <label>JIRA Base URL</label>
+        <input type="text" id="cfgJiraUrl" placeholder="https://yourcompany.atlassian.net" />
+      </div>
+      <div class="setting-row">
+        <label>JIRA Email</label>
+        <input type="email" id="cfgJiraEmail" placeholder="you@company.com" />
+      </div>
+      <div class="setting-row">
+        <label>JIRA API Token</label>
+        <input type="password" id="cfgJiraToken" placeholder="ATATT3x..." />
+        <div class="setting-info">Generate at: id.atlassian.com/manage-profile/security/api-tokens</div>
+      </div>
+      <button class="btn btn-jira" onclick="testJiraConnection()" style="margin-top:8px;">Test JIRA Connection</button>
+      <div id="jiraTestResult" style="margin-top:8px;font-size:12px;"></div>
+    </div>
+
+    <div class="modal-section">
+      <h3>AI Model</h3>
+      <div class="setting-row">
+        <label>Default Model</label>
+        <select id="cfgModel" style="background:var(--bg3);border:1px solid var(--border2);color:var(--text);padding:8px;border-radius:var(--radius);font-family:var(--font);">
+          <option value="claude-sonnet-4-20250514">Claude Sonnet 4.6 (Recommended)</option>
+          <option value="claude-opus-4-20250514">Claude Opus 4.6 (Most powerful)</option>
+          <option value="claude-haiku-4-5-20251001">Claude Haiku 4.5 (Fastest)</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="modal-section">
+      <h3>BRD Template</h3>
+      <div class="setting-row">
+        <label>Organization Name</label>
+        <input type="text" id="cfgOrgName" placeholder="e.g. Paytm, PhonePe, HDFC" />
+      </div>
+      <div class="setting-row">
+        <label>Default Domain</label>
+        <select id="cfgDomain" style="background:var(--bg3);border:1px solid var(--border2);color:var(--text);padding:8px;border-radius:var(--radius);font-family:var(--font);">
+          <option value="UPI">UPI</option>
+          <option value="IMPS">IMPS</option>
+          <option value="NEFT">NEFT</option>
+          <option value="Payout">Payout</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="btn-row">
+      <button class="btn btn-primary" onclick="saveSettings()">Save Settings</button>
+      <button class="btn btn-secondary" onclick="closeSettings()">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ─────────────────────────────────────────────
+//  SERVER MODE DETECTION
+// ─────────────────────────────────────────────
+const IS_SERVER = window.location.protocol !== 'file:' && window.location.port !== '';
+const API_BASE = IS_SERVER ? '' : 'https://api.anthropic.com';
+
+// Auto-load server config if running via Node
+if (IS_SERVER) {
+  fetch('/api/config').then(r=>r.json()).then(cfg => {
+    if (!STATE) return;
+    if (cfg.jiraUrl) STATE.settings.jiraUrl = cfg.jiraUrl;
+    if (cfg.jiraEmail) STATE.settings.jiraEmail = cfg.jiraEmail;
+    if (cfg.anthropicConfigured) STATE.settings._serverHasKey = true;
+    if (cfg.jiraConfigured) STATE.settings._serverHasJira = true;
+    renderPhase1();
+  }).catch(()=>{});
+}
+
+// ─────────────────────────────────────────────
+//  STATE
+// ─────────────────────────────────────────────
+const STATE = {
+  phase: 1,
+  source: 'web',
+  askQ: true,
+  model: 'claude-sonnet-4-20250514',
+  history: JSON.parse(localStorage.getItem('brdforge_history') || '[]'),
+  current: {
+    jiraId: '', subject: '', domain: 'UPI', description: '',
+    ac: '', priority: '', attachments: [], jiraData: null
+  },
+  questions: [],
+  answers: {},
+  brdRaw: '',
+  viewIdx: null,
+  settings: JSON.parse(localStorage.getItem('brdforge_settings') || '{}')
+};
+
+const BRD_SYSTEM = `You are a senior BRD specialist for UPI/payment switch systems at a major Indian fintech. Generate a comprehensive, production-grade BRD in the following exact 24-section format. Use markdown with ## for section headers. Use markdown tables (| col | col |) for structured data. Be exhaustive — engineering teams must be able to implement from this BRD without further clarification.
+
+SECTIONS TO INCLUDE:
+## 1. Document Metadata
+Table: Feature Name, Domain, Date, Version, Author, Status, JIRA ID, Priority
+
+## 2. Executive Summary
+3-4 sentences: what it does, why needed, what changes in system.
+
+## 3. Regulatory / Compliance Reference
+Table: Reference | Description | Circular ID | Deadline
+
+## 4. Problem Statement
+Bullet list of current problems.
+
+## 5. Objective
+Bullet list of goals.
+
+## 6. Scope
+In Scope bullets. Out of Scope bullets.
+
+## 7. Terminology
+Table: Term | Meaning
+
+## 8. System Architecture Overview
+Components involved, their roles.
+
+## 9. Transaction Lifecycle
+Numbered step-by-step flow.
+
+## 10. Current Flow (AS-IS)
+Describe current behavior with flow arrows.
+
+## 11. Proposed Flow (TO-BE)
+New behavior with step-by-step validation logic.
+
+## 12. Business Rules
+Table: Rule ID | Rule Description | Priority
+
+## 13. API Behaviour
+Table: API Name | Current Behaviour | New Behaviour | Parameters Affected
+
+## 14. Error Code Mapping
+Table: Scenario | Error Code | Source | Message
+
+## 15. Edge Case Handling
+Table: Scenario | Current Behaviour | Expected Behaviour
+
+## 16. Reconciliation Impact
+Whether debit/credit/settlement/recon entries occur for blocked transactions.
+
+## 17. Risk Assessment
+Table: Risk | Likelihood | Impact | Mitigation
+
+## 18. Monitoring & Metrics
+Metrics to track. Alerts to configure.
+
+## 19. Configuration Management
+Table: Config Key | Purpose | Default Value | Type
+
+## 20. UAT Test Scenarios
+Table: Test ID | Scenario | Input | Expected Output
+
+## 21. Rollout Strategy
+Phased rollout plan.
+
+## 22. Rollback Plan
+How to revert if issues arise.
+
+## 23. Success Metrics
+Measurable success criteria.
+
+## 24. Failure Scenario Matrix
+Table: Failure Point | System Behaviour | Customer Impact | Recovery Action
+
+Be thorough. Tables should have 4-8 rows minimum where applicable. This BRD will be reviewed by NPCI compliance teams.`;
+
+// ─────────────────────────────────────────────
+//  SETTINGS
+// ─────────────────────────────────────────────
+function openSettings() {
+  const s = STATE.settings;
+  document.getElementById('cfgAnthropicKey').value = s.anthropicKey || '';
+  document.getElementById('cfgJiraUrl').value = s.jiraUrl || '';
+  document.getElementById('cfgJiraEmail').value = s.jiraEmail || '';
+  document.getElementById('cfgJiraToken').value = s.jiraToken || '';
+  document.getElementById('cfgOrgName').value = s.orgName || '';
+  document.getElementById('cfgModel').value = s.model || 'claude-sonnet-4-20250514';
+  document.getElementById('settingsModal').classList.add('show');
+}
+function closeSettings() { document.getElementById('settingsModal').classList.remove('show'); }
+function saveSettings() {
+  STATE.settings = {
+    anthropicKey: document.getElementById('cfgAnthropicKey').value.trim(),
+    jiraUrl: document.getElementById('cfgJiraUrl').value.trim().replace(/\/$/, ''),
+    jiraEmail: document.getElementById('cfgJiraEmail').value.trim(),
+    jiraToken: document.getElementById('cfgJiraToken').value.trim(),
+    orgName: document.getElementById('cfgOrgName').value.trim(),
+    model: document.getElementById('cfgModel').value
+  };
+  localStorage.setItem('brdforge_settings', JSON.stringify(STATE.settings));
+  if (STATE.settings.model) {
+    STATE.model = STATE.settings.model;
+    document.getElementById('modelSelect').value = STATE.model;
+    updateModelLabel();
+  }
+  closeSettings();
+  alert('Settings saved successfully!');
+}
+
+async function testJiraConnection() {
+  const url = document.getElementById('cfgJiraUrl').value.trim();
+  const email = document.getElementById('cfgJiraEmail').value.trim();
+  const token = document.getElementById('cfgJiraToken').value.trim();
+  const res = document.getElementById('jiraTestResult');
+  if (!url || !email || !token) { res.innerHTML = '<span style="color:var(--red)">Please fill all JIRA fields.</span>'; return; }
+  res.innerHTML = '<span style="color:var(--text3)">Testing connection...</span>';
+  try {
+    const r = await fetch(`${url}/rest/api/3/myself`, {
+      headers: { 'Authorization': 'Basic ' + btoa(`${email}:${token}`), 'Accept': 'application/json' }
+    });
+    if (r.ok) {
+      const d = await r.json();
+      res.innerHTML = `<span style="color:var(--green)">✓ Connected as ${d.displayName} (${d.emailAddress})</span>`;
+    } else {
+      res.innerHTML = `<span style="color:var(--red)">✗ Auth failed (${r.status}). Check URL/email/token.</span>`;
+    }
+  } catch(e) {
+    res.innerHTML = `<span style="color:var(--amber)">⚠ CORS blocked in browser. Works in offline/Node mode. Error: ${e.message}</span>`;
+  }
+}
+
+// ─────────────────────────────────────────────
+//  JIRA FETCH
+// ─────────────────────────────────────────────
+async function fetchJiraIssue(jiraId) {
+  const s = STATE.settings;
+
+  // SERVER MODE: use the Node.js proxy (no CORS issues)
+  if (IS_SERVER && s._serverHasJira) {
+    try {
+      const r = await fetch(`/api/jira-issue/${jiraId}`);
+      if (!r.ok) { const e = await r.json(); return { error: e.error || `JIRA error ${r.status}` }; }
+      return await r.json();
+    } catch(e) { return { error: 'Server proxy error: ' + e.message }; }
+  }
+
+  // BROWSER MODE: direct fetch (may hit CORS on some JIRA instances)
+  if (!s.jiraUrl || !s.jiraEmail || !s.jiraToken) {
+    return { error: 'JIRA not configured. Click ⚙ Settings to add credentials.' };
+  }
+  const url = `${s.jiraUrl}/rest/api/3/issue/${jiraId}`;
+  try {
+    const r = await fetch(url, {
+      headers: {
+        'Authorization': 'Basic ' + btoa(`${s.jiraEmail}:${s.jiraToken}`),
+        'Accept': 'application/json'
+      }
+    });
+    if (!r.ok) return { error: `JIRA API error: ${r.status} ${r.statusText}` };
+    const d = await r.json();
+    const f = d.fields;
+    return {
+      id: d.key,
+      summary: f.summary || '',
+      description: extractJiraText(f.description),
+      status: f.status?.name || '',
+      priority: f.priority?.name || '',
+      assignee: f.assignee?.displayName || 'Unassigned',
+      reporter: f.reporter?.displayName || '',
+      created: f.created?.split('T')[0] || '',
+      updated: f.updated?.split('T')[0] || '',
+      labels: (f.labels || []).join(', '),
+      components: (f.components || []).map(c => c.name).join(', '),
+      fixVersions: (f.fixVersions || []).map(v => v.name).join(', '),
+      acceptanceCriteria: extractCustomField(f, 'Acceptance Criteria') || '',
+      storyPoints: f.story_points || f.customfield_10016 || '',
+      epicName: f.customfield_10014 || f['Epic Name'] || '',
+      comments: extractComments(f.comment),
+      attachments: (f.attachment || []).map(a => a.filename).join(', ')
+    };
+  } catch(e) {
+    return { error: `Network error: ${e.message}. If running in browser, ensure CORS is allowed or use the desktop/Node version.` };
+  }
+}
+
+function extractJiraText(doc) {
+  if (!doc) return '';
+  if (typeof doc === 'string') return doc;
+  try {
+    return doc.content?.map(block => {
+      if (block.type === 'paragraph') return block.content?.map(n => n.text || '').join('') || '';
+      if (block.type === 'bulletList') return block.content?.map(li => '• ' + (li.content?.[0]?.content?.map(n => n.text||'').join('') || '')).join('\n') || '';
+      if (block.type === 'orderedList') return block.content?.map((li,i) => `${i+1}. ` + (li.content?.[0]?.content?.map(n => n.text||'').join('') || '')).join('\n') || '';
+      return '';
+    }).filter(Boolean).join('\n') || '';
+  } catch { return ''; }
+}
+
+function extractCustomField(fields, name) {
+  for (const key of Object.keys(fields)) {
+    if (key.toLowerCase().includes('acceptance') || (fields[key] && typeof fields[key] === 'string' && key.includes('customfield'))) {
+      if (key === 'customfield_10023' || key === 'customfield_10034') return fields[key];
+    }
+  }
+  return '';
+}
+
+function extractComments(commentObj) {
+  if (!commentObj?.comments?.length) return '';
+  return commentObj.comments.slice(-3).map(c =>
+    `[${c.author?.displayName}]: ${extractJiraText(c.body)}`
+  ).join('\n');
+}
+
+// ─────────────────────────────────────────────
+//  UI HELPERS
+// ─────────────────────────────────────────────
+function updateModel() {
+  STATE.model = document.getElementById('modelSelect').value;
+  updateModelLabel();
+}
+function updateModelLabel() {
+  const opts = { 'claude-sonnet-4-20250514': 'Claude Sonnet 4.6', 'claude-opus-4-20250514': 'Claude Opus 4.6', 'claude-haiku-4-5-20251001': 'Claude Haiku 4.5' };
+  document.getElementById('modelLabel').textContent = opts[STATE.model] || STATE.model;
+}
+function setSource(s) {
+  STATE.source = s;
+  ['Web','Prev','Both'].forEach(x => document.getElementById('src'+x).classList.remove('active'));
+  const map = { web:'Web', previous:'Prev', both:'Both' };
+  document.getElementById('src'+map[s]).classList.add('active');
+}
+function toggleAskQ() {
+  STATE.askQ = !STATE.askQ;
+  document.getElementById('askQToggle').classList.toggle('on', STATE.askQ);
+}
+function setProgress(n) {
+  STATE.phase = n;
+  for (let i = 1; i <= 5; i++) {
+    const el = document.getElementById('ps'+i);
+    el.className = 'prog-step' + (i < n ? ' done' : i === n ? ' active' : '');
+  }
+}
+
+function renderHistory() {
+  const el = document.getElementById('historyList');
+  if (!STATE.history.length) {
+    el.innerHTML = '<div class="empty-history">No BRDs generated yet</div>'; return;
+  }
+  el.innerHTML = STATE.history.map((h, i) => `
+    <div class="history-item ${STATE.viewIdx === i ? 'active' : ''}" onclick="viewHistoryItem(${i})">
+      <div class="hi-title">${h.subject || 'Untitled'}</div>
+      <div class="hi-meta">
+        <span class="hi-domain">${h.domain}</span>
+        <span>${h.date}</span>
+        ${h.jiraId ? `<span class="badge badge-blue" style="font-size:10px;padding:1px 6px;">${h.jiraId}</span>` : ''}
+      </div>
+    </div>`).join('');
+}
+
+function viewHistoryItem(i) {
+  STATE.viewIdx = i;
+  STATE.brdRaw = STATE.history[i].brd;
+  renderHistory();
+  setProgress(5);
+  renderPhase5();
+}
+
+function startNew() {
+  STATE.viewIdx = null;
+  STATE.phase = 1;
+  STATE.current = { jiraId: '', subject: '', domain: STATE.settings.defaultDomain || 'UPI', description: '', ac: '', priority: '', attachments: [], jiraData: null };
+  STATE.questions = [];
+  STATE.answers = {};
+  STATE.brdRaw = '';
+  renderHistory();
+  setProgress(1);
+  renderPhase1();
+}
+
+// ─────────────────────────────────────────────
+//  PHASE 1 — INPUT
+// ─────────────────────────────────────────────
+function renderPhase1() {
+  const c = STATE.current;
+  const domains = ['UPI','IMPS','NEFT','RTGS','Payout','Mandate','Refund','Dispute'];
+  const priorities = ['P0 - Critical','P1 - High','P2 - Medium','P3 - Low'];
+  const jiraConfigured = !!(STATE.settings.jiraUrl && STATE.settings.jiraEmail && STATE.settings.jiraToken);
+
+  document.getElementById('content').innerHTML = `
+    <div class="card active-card">
+      <div class="card-header">
+        <div class="card-num">1</div>
+        <div class="card-title">Requirement Input</div>
+        <div class="card-badge"><span class="badge badge-purple">Step 1 of 4</span></div>
+      </div>
+
+      <!-- JIRA CONNECTOR -->
+      <div class="jira-connector">
+        <div class="jira-header">
+          <div class="jira-logo">J</div>
+          <div class="jira-title">JIRA Connector</div>
+          <div class="jira-status">
+            ${jiraConfigured
+              ? '<div class="conn-status"><div class="conn-dot ok"></div><span style="color:var(--green);font-size:12px;">Configured</span></div>'
+              : '<div class="conn-status"><div class="conn-dot idle"></div><span style="font-size:12px;color:var(--text3);">Not configured — <a href="#" onclick="openSettings()" style="color:var(--blue)">Settings</a></span></div>'}
+          </div>
+        </div>
+        <div class="jira-fetch-row">
+          <input id="jiraIdInput" placeholder="Enter JIRA ID (e.g. UPI-1234, PLAT-567)" value="${c.jiraId}"
+            oninput="STATE.current.jiraId=this.value"
+            onkeydown="if(event.key==='Enter') fetchJira()"/>
+          <button class="btn btn-jira" onclick="fetchJira()" id="fetchBtn">
+            ↓ Fetch from JIRA
+          </button>
+        </div>
+        ${!jiraConfigured ? `<div class="jira-help">💡 Configure JIRA credentials in Settings to auto-fetch issue details. Or enter requirements manually below.</div>` : ''}
+        <div class="jira-fetched" id="jiraFetched"></div>
+      </div>
+
+      <div class="divider"></div>
+
+      <!-- MANUAL INPUT -->
+      <div class="form-grid">
+        <div class="form-group">
+          <label>Feature Name / Subject</label>
+          <input id="inp_subject" placeholder="e.g. Block P2M collect on Android" value="${c.subject}" oninput="STATE.current.subject=this.value"/>
+        </div>
+        <div class="form-group">
+          <label>Priority</label>
+          <select id="inp_priority" onchange="STATE.current.priority=this.value">
+            <option value="">Select...</option>
+            ${priorities.map(p => `<option value="${p}" ${c.priority===p?'selected':''}>${p}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+
+      <div class="form-group" style="margin-bottom:14px;">
+        <label>Domain</label>
+        <div class="tag-row" id="domainTags">
+          ${domains.map(d => `<div class="tag ${c.domain===d?'selected':''}" onclick="selectDomain('${d}')">${d}</div>`).join('')}
+        </div>
+      </div>
+
+      <div class="form-group" style="margin-bottom:14px;">
+        <label>Description / JIRA Body / Requirement Details</label>
+        <textarea id="inp_desc" placeholder="Paste JIRA description, requirement, or any context here. The more detail, the better the BRD." oninput="STATE.current.description=this.value">${c.description}</textarea>
+      </div>
+
+      <div class="form-grid">
+        <div class="form-group">
+          <label>Acceptance Criteria</label>
+          <textarea id="inp_ac" placeholder="What are the conditions for acceptance?" style="min-height:70px" oninput="STATE.current.ac=this.value">${c.ac}</textarea>
+        </div>
+        <div class="form-group">
+          <label>Additional Context / Links</label>
+          <textarea id="inp_ctx" placeholder="Slack links, Confluence pages, NPCI circular references..." style="min-height:70px"></textarea>
+        </div>
+      </div>
+
+      <div class="form-group" style="margin-bottom:14px;">
+        <label>Attach Files (specs, circulars, API docs — .txt .md .csv .json)</label>
+        <div class="file-drop" onclick="document.getElementById('fileInput').click()">
+          <input type="file" id="fileInput" multiple accept=".txt,.md,.csv,.json,.xml" style="display:none" onchange="handleFiles(event)"/>
+          Click to attach supporting documents
+        </div>
+        <div id="fileList" style="margin-top:6px;"></div>
+      </div>
+
+      <div class="btn-row">
+        <button class="btn btn-primary" onclick="proceedGather()">Gather & Analyze →</button>
+      </div>
+    </div>`;
+
+  // Restore jira fetched state
+  if (c.jiraData) renderJiraFetched(c.jiraData);
+}
+
+function selectDomain(d) {
+  STATE.current.domain = d;
+  document.querySelectorAll('#domainTags .tag').forEach(t => t.classList.toggle('selected', t.textContent === d));
+}
+
+async function fetchJira() {
+  const jiraId = document.getElementById('jiraIdInput').value.trim().toUpperCase();
+  if (!jiraId) { alert('Enter a JIRA ID first.'); return; }
+  STATE.current.jiraId = jiraId;
+  const btn = document.getElementById('fetchBtn');
+  btn.disabled = true; btn.textContent = 'Fetching...';
+  const data = await fetchJiraIssue(jiraId);
+  btn.disabled = false; btn.innerHTML = '↓ Fetch from JIRA';
+  if (data.error) {
+    document.getElementById('jiraFetched').className = 'jira-fetched show';
+    document.getElementById('jiraFetched').innerHTML = `<span style="color:var(--red)">✗ ${data.error}</span>`;
+    return;
+  }
+  STATE.current.jiraData = data;
+  // Auto-populate form
+  if (data.summary) { STATE.current.subject = data.summary; document.getElementById('inp_subject').value = data.summary; }
+  if (data.description) { STATE.current.description = data.description; document.getElementById('inp_desc').value = data.description; }
+  if (data.acceptanceCriteria) { STATE.current.ac = data.acceptanceCriteria; document.getElementById('inp_ac').value = data.acceptanceCriteria; }
+  if (data.priority) {
+    const pMap = { Highest:'P0 - Critical', High:'P1 - High', Medium:'P2 - Medium', Low:'P3 - Low', Lowest:'P3 - Low' };
+    const mapped = pMap[data.priority] || '';
+    if (mapped) { STATE.current.priority = mapped; document.getElementById('inp_priority').value = mapped; }
+  }
+  renderJiraFetched(data);
+}
+
+function renderJiraFetched(d) {
+  const el = document.getElementById('jiraFetched');
+  if (!el) return;
+  el.className = 'jira-fetched show';
+  el.innerHTML = `
+    <div style="color:var(--green);font-size:12px;font-weight:600;margin-bottom:8px;">✓ JIRA issue fetched & auto-populated</div>
+    ${row('ID', d.id)} ${row('Status', d.status)} ${row('Reporter', d.reporter)}
+    ${row('Assignee', d.assignee)} ${row('Components', d.components)}
+    ${d.labels ? row('Labels', d.labels) : ''}
+    ${d.fixVersions ? row('Fix Version', d.fixVersions) : ''}
+    ${d.comments ? row('Latest Comment', d.comments.slice(0,120)+'...') : ''}`;
+}
+function row(label, val) { return val ? `<div class="jira-field"><span class="jf-label">${label}</span><span class="jf-value">${val}</span></div>` : ''; }
+
+function handleFiles(e) {
+  Array.from(e.target.files).forEach(f => {
+    const reader = new FileReader();
+    reader.onload = ev => {
+      STATE.current.attachments.push({ name: f.name, content: ev.target.result.slice(0, 4000) });
+      renderFileList();
+    };
+    reader.readAsText(f);
+  });
+}
+function renderFileList() {
+  const el = document.getElementById('fileList');
+  if (!el) return;
+  el.innerHTML = STATE.current.attachments.map((f,i) =>
+    `<span class="file-tag">${f.name} <span class="rm" onclick="removeFile(${i})">×</span></span>`).join('');
+}
+function removeFile(i) { STATE.current.attachments.splice(i,1); renderFileList(); }
+
+async function proceedGather() {
+  const c = STATE.current;
+  if (!c.subject && !c.description) { alert('Please enter at least a Feature Name or Description.'); return; }
+  setProgress(2);
+  showLoading('Analyzing requirements and context');
+  if (STATE.askQ) {
+    await generateQuestions();
+  } else {
+    await generateBRD();
+  }
+}
+
+// ─────────────────────────────────────────────
+//  PHASE 3 — QUESTIONS
+// ─────────────────────────────────────────────
+async function generateQuestions() {
+  const c = STATE.current;
+  const attachCtx = c.attachments.map(a => `File: ${a.name}\n${a.content}`).join('\n\n---\n\n');
+  const jiraCtx = c.jiraData ? `\nJIRA Data: ${JSON.stringify(c.jiraData, null, 2).slice(0,1000)}` : '';
+  const prompt = `You are a UPI/payments BRD expert. Based on this requirement, generate exactly 6 targeted clarification questions that would significantly improve the BRD quality. Focus on regulatory, technical, reconciliation, and edge case gaps.
+
+Feature: ${c.subject}
+Domain: ${c.domain}
+JIRA ID: ${c.jiraId}
+Description: ${c.description}
+AC: ${c.ac}
+${jiraCtx}
+${attachCtx ? 'Attachments:\n'+attachCtx : ''}
+
+Return ONLY a JSON array of 6 strings. No other text.`;
+
+  try {
+    const apiKey = STATE.settings.anthropicKey || '';
+    const headers = { 'Content-Type': 'application/json' };
+    if (apiKey) headers['x-api-key'] = apiKey;
+
+    const endpoint = IS_SERVER ? '/api/claude' : 'https://api.anthropic.com/v1/messages';
+    const r = await fetch(endpoint, {
+      method: 'POST', headers,
+      body: JSON.stringify({ model: STATE.model, max_tokens: 1000, messages: [{ role:'user', content: prompt }] })
+    });
+    const d = await r.json();
+    const txt = d.content?.map(c=>c.text||'').join('').replace(/```json|```/g,'').trim();
+    STATE.questions = JSON.parse(txt);
+  } catch {
+    STATE.questions = [
+      'Which specific NPCI circular or RBI guideline mandates this change, and what is the compliance deadline?',
+      'Are there any merchant VPA categories, PSPs, or payment corridors that should be exempted from this rule?',
+      'What error code and user-facing message should be returned to the customer when blocked?',
+      'How should the switch handle in-flight transactions that were initiated before the feature goes live?',
+      'What monitoring thresholds and alerts should trigger an automatic rollback?',
+      'How does this feature interact with UPI Lite, UPI AutoPay, or credit-on-UPI flows?'
+    ];
+  }
+  setProgress(3);
+  renderPhase3();
+}
+
+function renderPhase3() {
+  document.getElementById('content').innerHTML = `
+    <div class="card active-card">
+      <div class="card-header">
+        <div class="card-num">3</div>
+        <div class="card-title">Clarification Questions</div>
+        <div class="card-badge"><span class="badge badge-amber">Optional — improves BRD quality</span></div>
+      </div>
+      <p style="font-size:13px;color:var(--text3);margin-bottom:16px;">Answer any questions to help generate a more accurate BRD. All are optional.</p>
+      ${STATE.questions.map((q,i) => `
+        <div class="q-item">
+          <div class="q-label">Q${i+1}: ${q}</div>
+          <textarea placeholder="Your answer (leave blank to skip)..." oninput="STATE.answers[${i}]=this.value">${STATE.answers[i]||''}</textarea>
+        </div>`).join('')}
+      <div class="btn-row">
+        <button class="btn btn-primary" onclick="proceedGenerate()">Generate BRD →</button>
+        <button class="btn btn-secondary" onclick="proceedGenerate(true)">Skip All & Generate</button>
+      </div>
+    </div>`;
+}
+
+async function proceedGenerate(skip) {
+  if (skip) STATE.answers = {};
+  setProgress(4);
+  await generateBRD();
+}
+
+// ─────────────────────────────────────────────
+//  PHASE 4 — GENERATE
+// ─────────────────────────────────────────────
+function showLoading(msg) {
+  document.getElementById('content').innerHTML = `
+    <div class="card">
+      <div class="loading-card">
+        <div class="spinner"></div>
+        <div class="loading-text">${msg}<span class="loading-dots"></span></div>
+      </div>
+    </div>`;
+}
+
+async function generateBRD() {
+  showLoading('Generating comprehensive BRD document');
+  const c = STATE.current;
+  const attachCtx = c.attachments.map(a => `\n--- Attachment: ${a.name} ---\n${a.content}`).join('\n');
+  const qaCtx = STATE.questions.length > 0 && Object.keys(STATE.answers).length > 0
+    ? '\n\nClarification Q&A:\n' + STATE.questions.map((q,i) => STATE.answers[i] ? `Q: ${q}\nA: ${STATE.answers[i]}` : '').filter(Boolean).join('\n\n')
+    : '';
+  const jiraCtx = c.jiraData ? `\n\nJIRA Details:\n- Status: ${c.jiraData.status}\n- Reporter: ${c.jiraData.reporter}\n- Components: ${c.jiraData.components}\n- Labels: ${c.jiraData.labels}\n- Comments: ${c.jiraData.comments}` : '';
+  const prevCtx = (STATE.source === 'previous' || STATE.source === 'both') && STATE.history.length > 0
+    ? '\n\nReference from previous BRDs:\n' + STATE.history.slice(-2).map(h => h.brd.slice(0, 600)).join('\n---\n')
+    : '';
+  const webCtx = (STATE.source === 'web' || STATE.source === 'both')
+    ? '\n\nApply latest NPCI UPI circulars (2024-2026), RBI payment guidelines, and UPI 2.0 switch architecture best practices.'
+    : '';
+  const orgCtx = STATE.settings.orgName ? `\nOrganization: ${STATE.settings.orgName}` : '';
+
+  const userMsg = `Generate a complete 24-section BRD for:
+
+JIRA ID: ${c.jiraId || 'N/A'}
+Feature: ${c.subject}
+Domain: ${c.domain}
+Priority: ${c.priority || 'Not specified'}
+${orgCtx}
+
+Description:
+${c.description || '(Infer from feature name and domain)'}
+
+Acceptance Criteria:
+${c.ac || '(Not provided)'}
+${jiraCtx}${attachCtx}${qaCtx}${prevCtx}${webCtx}
+
+Generate the FULL 24-section BRD. Include all tables with realistic, domain-accurate data. Make it production-ready for NPCI compliance review.`;
+
+  try {
+    const headers = { 'Content-Type': 'application/json' };
+    const apiKey = STATE.settings.anthropicKey || '';
+    if (apiKey) headers['x-api-key'] = apiKey;
+
+    const endpoint = IS_SERVER ? '/api/claude' : 'https://api.anthropic.com/v1/messages';
+    const r = await fetch(endpoint, {
+      method: 'POST', headers,
+      body: JSON.stringify({ model: STATE.model, max_tokens: 1000, system: BRD_SYSTEM, messages: [{ role:'user', content: userMsg }] })
+    });
+    const d = await r.json();
+    if (d.error) throw new Error(d.error.message || JSON.stringify(d.error));
+    STATE.brdRaw = d.content?.map(c=>c.text||'').join('') || '';
+
+    const entry = {
+      subject: c.subject || 'Untitled',
+      domain: c.domain,
+      jiraId: c.jiraId,
+      date: new Date().toLocaleDateString('en-IN', { day:'2-digit', month:'short', year:'numeric' }),
+      model: STATE.model,
+      brd: STATE.brdRaw
+    };
+    STATE.history.unshift(entry);
+    localStorage.setItem('brdforge_history', JSON.stringify(STATE.history.slice(0, 50)));
+    renderHistory();
+    setProgress(5);
+    renderPhase5();
+  } catch(e) {
+    document.getElementById('content').innerHTML = `
+      <div class="card">
+        <div style="padding:8px;">
+          <div class="badge badge-red" style="margin-bottom:12px;">Generation Failed</div>
+          <p style="font-size:13px;color:var(--text2);margin-bottom:12px;">${e.message}</p>
+          ${!STATE.settings.anthropicKey ? '<p style="font-size:12px;color:var(--amber);">💡 Add your Anthropic API key in Settings to use BRDForge offline.</p>' : ''}
+          <div class="btn-row">
+            <button class="btn btn-primary" onclick="proceedGenerate()">Retry</button>
+            <button class="btn btn-secondary" onclick="startNew()">Start Over</button>
+          </div>
+        </div>
+      </div>`;
+  }
+}
+
+// ─────────────────────────────────────────────
+//  PHASE 5 — OUTPUT
+// ─────────────────────────────────────────────
+function renderPhase5() {
+  const brd = STATE.brdRaw;
+  document.getElementById('content').innerHTML = `
+    <div>
+      <div class="brd-action-bar">
+        <span class="badge badge-green">BRD Ready</span>
+        <span class="badge badge-blue">${document.getElementById('modelSelect').options[document.getElementById('modelSelect').selectedIndex]?.text || STATE.model}</span>
+        <button class="btn btn-secondary" style="margin-left:auto" onclick="copyBRD()" id="copyBtn">⎘ Copy Markdown</button>
+        <button class="btn btn-secondary" onclick="downloadBRD()">↓ Download .md</button>
+        <button class="btn btn-primary" onclick="startNew()">+ New BRD</button>
+      </div>
+      <div class="brd-doc" id="brdDoc">${parseBRD(brd)}</div>
+    </div>`;
+}
+
+function parseBRD(md) {
+  const lines = md.split('\n');
+  let html = '';
+  let inTable = false, tableRows = [];
+
+  function flushTable() {
+    if (tableRows.length < 2) { tableRows=[]; inTable=false; return; }
+    const headers = tableRows[0].split('|').map(h=>h.trim()).filter(Boolean);
+    const body = tableRows.slice(2);
+    html += '<table class="brd-table"><tr>' + headers.map(h=>`<th>${h}</th>`).join('') + '</tr>';
+    body.forEach(r => {
+      const cells = r.split('|').map(c=>c.trim()).filter(Boolean);
+      if (cells.length) html += '<tr>' + cells.map(c=>`<td>${c}</td>`).join('') + '</tr>';
+    });
+    html += '</table>';
+    tableRows=[]; inTable=false;
+  }
+
+  lines.forEach(line => {
+    if (line.startsWith('## ') || line.startsWith('# ')) {
+      if(inTable) flushTable();
+      const title = line.replace(/^#+\s/,'');
+      const numMatch = title.match(/^(\d+)\.\s*(.*)/);
+      if(numMatch) html += `<div class="brd-section-title"><span class="sn">${numMatch[1]}</span>${numMatch[2]}</div>`;
+      else html += `<div class="brd-section-title">${title}</div>`;
+    } else if (line.startsWith('|')) {
+      inTable=true; tableRows.push(line);
+    } else {
+      if(inTable) flushTable();
+      if (line.startsWith('- ') || line.startsWith('* ')) {
+        html += `<ul class="brd-ul"><li>${line.replace(/^[-*]\s/,'').replace(/\*\*(.*?)\*\*/g,'<strong>$1</strong>')}</li></ul>`;
+      } else if (line.match(/^\d+\.\s/)) {
+        html += `<p class="brd-p">${line.replace(/\*\*(.*?)\*\*/g,'<strong>$1</strong>')}</p>`;
+      } else if (line.startsWith('```')) {
+        // skip code fences
+      } else if (line.trim()) {
+        html += `<p class="brd-p">${line.replace(/\*\*(.*?)\*\*/g,'<strong>$1</strong>').replace(/`(.*?)`/g,'<code style="background:var(--bg3);padding:1px 5px;border-radius:4px;font-family:var(--mono);font-size:11px;color:var(--purple-light)">$1</code>')}</p>`;
+      }
+    }
+  });
+  if(inTable) flushTable();
+  return html;
+}
+
+function copyBRD() {
+  navigator.clipboard.writeText(STATE.brdRaw).then(() => {
+    const btn = document.getElementById('copyBtn');
+    btn.textContent = '✓ Copied!';
+    btn.style.color = 'var(--green)';
+    setTimeout(() => { btn.textContent = '⎘ Copy Markdown'; btn.style.color = ''; }, 2000);
+  });
+}
+function downloadBRD() {
+  const c = STATE.current;
+  const fname = `BRD_${(c.subject||'document').replace(/\s+/g,'-').replace(/[^a-zA-Z0-9-]/g,'')}_${new Date().toISOString().split('T')[0]}.md`;
+  const blob = new Blob([STATE.brdRaw], { type: 'text/markdown' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = fname; a.click();
+}
+function exportAll() {
+  if (!STATE.history.length) { alert('No BRDs to export.'); return; }
+  const data = JSON.stringify(STATE.history, null, 2);
+  const blob = new Blob([data], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `BRDForge_export_${new Date().toISOString().split('T')[0]}.json`;
+  a.click();
+}
+
+// ─────────────────────────────────────────────
+//  INIT
+// ─────────────────────────────────────────────
+if (STATE.settings.model) {
+  STATE.model = STATE.settings.model;
+  document.getElementById('modelSelect').value = STATE.model;
+  updateModelLabel();
+}
+renderHistory();
+startNew();
+</script>
+</body>
+</html>

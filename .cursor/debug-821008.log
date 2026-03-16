@@ -1,0 +1,2 @@
+{"sessionId":"821008","location":"server.js:connectors/status","message":"connectors status hit","data":{"jira":false,"slack":false},"timestamp":1773662554779}
+{"sessionId":"821008","location":"server.js:connectors/status","message":"connectors status hit","data":{"jira":false,"slack":false},"timestamp":1773662554795}

@@ -1,0 +1,24 @@
+{
+  "name": "ai-agents-backend",
+  "version": "1.0.0",
+  "description": "API proxy for PRD, UAT, and BRD agents — LLM, JIRA, DOCX export",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "cors": "^2.8.6",
+    "docx": "^9.6.1",
+    "dotenv": "^17.3.1",
+    "express": "^5.2.1",
+    "mammoth": "^1.11.0",
+    "multer": "^2.1.1",
+    "node-fetch": "^3.3.2",
+    "pdfjs-dist": "^5.5.207"
+  }
+}
