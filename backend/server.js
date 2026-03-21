@@ -9,6 +9,7 @@ import multer from "multer";
 import mammoth from "mammoth";
 import { Document, Packer, Paragraph, HeadingLevel } from "docx";
 import { extractTextFromPDF } from "./pdfParser.js";
+import { retrieve as ragRetrieve } from "./rag/retrieve.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -97,9 +98,15 @@ app.post("/api/generate", async (req, res) => {
       });
     }
     const incomingMessages = Array.isArray(req.body?.messages) ? req.body.messages : null;
-    const incomingSystem = typeof req.body?.system === "string" ? req.body.system : null;
-    const incomingMaxTokens = typeof req.body?.max_tokens === "number" ? req.body.max_tokens : 2000;
+    let incomingSystem = typeof req.body?.system === "string" ? req.body.system : null;
+    const incomingMaxTokens = typeof req.body?.max_tokens === "number" ? req.body.max_tokens : 8000;
     const messages = incomingMessages?.length ? incomingMessages : [{ role: "user", content: req.body?.prompt || "Generate PRD" }];
+    const userText = (messages.find((m) => m.role === "user")?.content || req.body?.prompt || "").slice(0, 4000);
+    const ragChunks = await ragRetrieve(userText, 5);
+    if (ragChunks.length > 0) {
+      const ragContext = "\n\n[Reference context from NPCI/UPI/PRD docs – use where relevant]\n" + ragChunks.join("\n\n");
+      incomingSystem = (incomingSystem || "") + ragContext;
+    }
     const requestBody = {
       model: LLM_MODEL,
       max_tokens: incomingMaxTokens,
@@ -319,6 +326,231 @@ app.get("/api/jira-issue/:id", async (req, res) => {
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Share: JIRA comment, Telegram, Email ─────────────────────────────────────
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
+
+function jiraCommentBody(plainText) {
+  const maxLen = 32000;
+  const text = String(plainText).slice(0, maxLen);
+  let content = text.split(/\n/).filter(Boolean).map((line) => ({
+    type: "paragraph",
+    content: [{ type: "text", text: line }],
+  }));
+  if (!content.length) content = [{ type: "paragraph", content: [{ type: "text", text: "(empty)" }] }];
+  return { body: { type: "doc", version: 1, content } };
+}
+
+app.post("/api/share/jira", async (req, res) => {
+  try {
+    const { issueKey, text, title } = req.body || {};
+    if (!issueKey || !text) return res.status(400).json({ success: false, error: "Missing issueKey or text" });
+    if (!JIRA_URL || !JIRA_EMAIL || !JIRA_TOKEN) return res.status(400).json({ success: false, error: "JIRA not configured in .env" });
+    const key = String(issueKey).toUpperCase().replace(/\s/g, "");
+    const comment = title ? `*${title}*\n\n${text}` : text;
+    const r = await fetch(`${JIRA_URL}/rest/api/3/issue/${key}/comment`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: "Basic " + Buffer.from(`${JIRA_EMAIL}:${JIRA_TOKEN}`).toString("base64"),
+      },
+      body: JSON.stringify(jiraCommentBody(comment)),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) return res.status(r.status).json({ success: false, error: data.errorMessages?.[0] || r.statusText });
+    res.json({ success: true, id: data.id });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post("/api/share/telegram", async (req, res) => {
+  try {
+    const { chatId, text, title } = req.body || {};
+    if (!chatId || !text) return res.status(400).json({ success: false, error: "Missing chatId or text" });
+    if (!TELEGRAM_BOT_TOKEN) return res.status(400).json({ success: false, error: "TELEGRAM_BOT_TOKEN not set in .env" });
+    const message = title ? `*${title}*\n\n${text}` : text;
+    const r = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: chatId, text: message.slice(0, 4096), parse_mode: "Markdown" }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!data.ok) return res.status(400).json({ success: false, error: data.description || "Telegram API error" });
+    res.json({ success: true, message_id: data.result?.message_id });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+const SLACK_WEBHOOK_URL = process.env.SLACK_WEBHOOK_URL || "";
+
+app.post("/api/share/slack", async (req, res) => {
+  try {
+    const { text, title, channel } = req.body || {};
+    if (!text) return res.status(400).json({ success: false, error: "Missing text" });
+    const webhookUrl = SLACK_WEBHOOK_URL || process.env.SLACK_WEBHOOK_URL;
+    if (!webhookUrl) return res.status(400).json({ success: false, error: "SLACK_WEBHOOK_URL not set in .env" });
+    const payload = title ? { text: `*${title}*\n\n${text}` } : { text: String(text).slice(0, 40000) };
+    if (channel) payload.channel = channel;
+    const r = await fetch(webhookUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!r.ok) {
+      const err = await r.text();
+      return res.status(r.status).json({ success: false, error: err || "Slack webhook failed" });
+    }
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post("/api/share/email", async (req, res) => {
+  try {
+    const { to, subject, text, title } = req.body || {};
+    if (!to || !text) return res.status(400).json({ success: false, error: "Missing to or text" });
+    const nodemailer = (await import("nodemailer")).default;
+    const transportOpts = {
+      host: process.env.EMAIL_SMTP_HOST || "smtp.gmail.com",
+      port: Number(process.env.EMAIL_SMTP_PORT) || 587,
+      secure: process.env.EMAIL_SECURE === "true",
+      auth: process.env.EMAIL_USER ? { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS || process.env.EMAIL_PASSWORD } : undefined,
+    };
+    const transporter = nodemailer.createTransport(transportOpts);
+    const body = title ? `${title}\n\n${text}` : text;
+    await transporter.sendMail({
+      from: process.env.EMAIL_FROM || process.env.EMAIL_USER || "noreply@local",
+      to,
+      subject: subject || "AI Agents Output",
+      text: body,
+    });
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ── Score (GPT 5.4 / configurable model) ─────────────────────────────────────
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
+const SCORE_MODEL = process.env.SCORE_MODEL || "gpt-4o";
+
+app.post("/api/score", async (req, res) => {
+  try {
+    const { type, content, title } = req.body || {};
+    if (!type || !content) return res.status(400).json({ success: false, error: "Missing type (prd|uat|brd) or content" });
+    if (!OPENAI_API_KEY) return res.status(400).json({ success: false, error: "OPENAI_API_KEY not set in .env for scoring" });
+    const docType = type === "uat" ? "UAT Signoff" : type === "brd" ? "BRD" : "PRD";
+    const systemPrompt = `You are an expert reviewer. Score the following ${docType} document on a scale of 1-10 (10 = excellent). Consider: completeness, clarity, compliance with NPCI/UPI norms, structure, and actionability. Respond with ONLY a JSON object: { "score": number, "maxScore": 10, "rationale": "2-3 sentence explanation" }. No other text.`;
+    const userContent = (title ? `Document: ${title}\n\n` : "") + String(content).slice(0, 12000);
+    const r = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: SCORE_MODEL,
+        messages: [{ role: "user", content: systemPrompt + "\n\n" + userContent }],
+        max_tokens: 400,
+      }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (data.error) return res.status(r.status || 500).json({ success: false, error: data.error.message || "OpenAI error" });
+    const raw = data.choices?.[0]?.message?.content || "";
+    let result;
+    try {
+      result = JSON.parse(raw.replace(/```json?\s*|\s*```/g, "").trim());
+    } catch (_) {
+      result = { score: 0, maxScore: 10, rationale: "Could not parse score from model." };
+    }
+    res.json({ success: true, ...result });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ── Completion notification (Email + Slack/WhatsApp) ─────────────────────────
+app.post("/api/notify/complete", async (req, res) => {
+  try {
+    const { agentName, identifier } = req.body || {};
+    if (!agentName || !identifier) return res.status(400).json({ success: false, error: "Missing agentName or identifier" });
+    const subject = `${agentName} — ${identifier} is done`;
+    const body = `${subject}\n\nGenerated at ${new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })}`;
+    const results = [];
+
+    // Email
+    const emailTo = process.env.NOTIFY_EMAIL || process.env.EMAIL_USER || "";
+    if (emailTo && (process.env.EMAIL_SMTP_HOST || process.env.EMAIL_USER)) {
+      try {
+        const nodemailer = (await import("nodemailer")).default;
+        const transportOpts = {
+          host: process.env.EMAIL_SMTP_HOST || "smtp.gmail.com",
+          port: Number(process.env.EMAIL_SMTP_PORT) || 587,
+          secure: process.env.EMAIL_SECURE === "true",
+          auth: process.env.EMAIL_USER ? { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS || process.env.EMAIL_PASSWORD } : undefined,
+        };
+        const transporter = nodemailer.createTransport(transportOpts);
+        await transporter.sendMail({
+          from: process.env.EMAIL_FROM || process.env.EMAIL_USER || "noreply@local",
+          to: emailTo,
+          subject,
+          text: body,
+        });
+        results.push("email:ok");
+      } catch (e) { results.push("email:" + e.message); }
+    }
+
+    // Slack
+    const slackUrl = process.env.SLACK_WEBHOOK_URL || "";
+    if (slackUrl) {
+      try {
+        const r = await fetch(slackUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: subject }),
+        });
+        results.push(r.ok ? "slack:ok" : "slack:failed");
+      } catch (e) { results.push("slack:" + e.message); }
+    }
+
+    // WhatsApp (Meta Business API)
+    const waToken = process.env.WHATSAPP_TOKEN || "";
+    const waPhoneId = process.env.WHATSAPP_PHONE_ID || "";
+    const waRecipient = process.env.WHATSAPP_NOTIFY_NUMBER || process.env.WHATSAPP_RECIPIENT || "";
+    if (waToken && waPhoneId && waRecipient) {
+      try {
+        const r = await fetch(`https://graph.facebook.com/v18.0/${waPhoneId}/messages`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${waToken}` },
+          body: JSON.stringify({ messaging_product: "whatsapp", to: waRecipient, type: "text", text: { body: subject } }),
+        });
+        results.push(r.ok ? "whatsapp:ok" : "whatsapp:failed");
+      } catch (e) { results.push("whatsapp:" + e.message); }
+    }
+
+    // Telegram
+    if (TELEGRAM_BOT_TOKEN) {
+      const tgChatId = process.env.TELEGRAM_NOTIFY_CHAT_ID || process.env.TELEGRAM_CHAT_ID || "";
+      if (tgChatId) {
+        try {
+          const r = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ chat_id: tgChatId, text: subject }),
+          });
+          results.push(r.ok ? "telegram:ok" : "telegram:failed");
+        } catch (e) { results.push("telegram:" + e.message); }
+      }
+    }
+
+    res.json({ success: true, results });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 

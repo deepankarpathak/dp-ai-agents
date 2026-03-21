@@ -1,4 +1,22 @@
 import { useState, useEffect, useCallback } from "react";
+import { API_BASE } from "./config.js";
+
+const PUBLISH_DEFAULTS_KEY = "publish-defaults-v1";
+function loadPublishDefaults() {
+  try {
+    const raw = localStorage.getItem(PUBLISH_DEFAULTS_KEY);
+    return raw ? JSON.parse(raw) : { jiraKey: "", telegramChatId: "", emailTo: "" };
+  } catch {
+    return { jiraKey: "", telegramChatId: "", emailTo: "" };
+  }
+}
+function savePublishDefaults(d) {
+  try {
+    localStorage.setItem(PUBLISH_DEFAULTS_KEY, JSON.stringify(d));
+  } catch {}
+}
+
+export { loadPublishDefaults, savePublishDefaults, PUBLISH_DEFAULTS_KEY };
 
 const CONNECTOR_LIST = [
   { id: "jira", label: "JIRA", icon: "J", color: "#0052CC", envHint: "JIRA_URL, JIRA_EMAIL, JIRA_TOKEN" },
@@ -13,9 +31,12 @@ export default function ConnectorsStatus() {
   const [open, setOpen] = useState(false);
   const [jiraTestResult, setJiraTestResult] = useState("");
   const [jiraTestLoading, setJiraTestLoading] = useState(false);
+  const [publishDefaults, setPublishDefaults] = useState(() => loadPublishDefaults());
+  useEffect(() => { if (open) setPublishDefaults(loadPublishDefaults()); }, [open]);
+  const [publishSaved, setPublishSaved] = useState(false);
 
   const fetchStatus = useCallback(() => {
-    fetch("/api/connectors/status")
+    fetch(`${API_BASE}/api/connectors/status`)
       .then((r) => r.json())
       .then((data) => setStatus(data))
       .catch(() => {});
@@ -26,7 +47,7 @@ export default function ConnectorsStatus() {
   const testJira = async () => {
     setJiraTestLoading(true); setJiraTestResult("");
     try {
-      const r = await fetch("/api/jira-test");
+      const r = await fetch(`${API_BASE}/api/jira-test`);
       const d = await r.json();
       if (d.ok) setJiraTestResult(`Connected as ${d.user}`);
       else setJiraTestResult(d.error || "Connection failed");
@@ -119,6 +140,46 @@ EMAIL_API_KEY=your-api-key
 
 # Telegram
 TELEGRAM_BOT_TOKEN=123456789:ABCdefGHI...`}</pre>
+            </div>
+
+            <div style={{ marginTop: 16, padding: 14, background: "#1e293b", borderRadius: 10, border: "1px solid #334155" }}>
+              <div style={{ fontSize: 12, fontWeight: 600, color: "#22c55e", marginBottom: 8 }}>Default publish destinations</div>
+              <p style={{ fontSize: 11, color: "#64748b", marginBottom: 10, lineHeight: 1.5 }}>Set these to use &quot;Publish&quot; on the final screen without typing each time (saved in browser).</p>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                <div>
+                  <label style={{ fontSize: 10, color: "#94a3b8", display: "block", marginBottom: 4 }}>Default JIRA issue key</label>
+                  <input
+                    type="text"
+                    placeholder="e.g. TSP-1889"
+                    value={publishDefaults.jiraKey}
+                    onChange={(e) => setPublishDefaults((p) => ({ ...p, jiraKey: e.target.value }))}
+                    style={{ width: "100%", background: "#0f172a", border: "1px solid #334155", borderRadius: 6, padding: "6px 10px", color: "#e2e8f0", fontSize: 12 }}
+                  />
+                </div>
+                <div>
+                  <label style={{ fontSize: 10, color: "#94a3b8", display: "block", marginBottom: 4 }}>Default Telegram chat ID</label>
+                  <input
+                    type="text"
+                    placeholder="e.g. -1001234567890"
+                    value={publishDefaults.telegramChatId}
+                    onChange={(e) => setPublishDefaults((p) => ({ ...p, telegramChatId: e.target.value }))}
+                    style={{ width: "100%", background: "#0f172a", border: "1px solid #334155", borderRadius: 6, padding: "6px 10px", color: "#e2e8f0", fontSize: 12 }}
+                  />
+                </div>
+                <div>
+                  <label style={{ fontSize: 10, color: "#94a3b8", display: "block", marginBottom: 4 }}>Default email (to)</label>
+                  <input
+                    type="text"
+                    placeholder="e.g. team@company.com"
+                    value={publishDefaults.emailTo}
+                    onChange={(e) => setPublishDefaults((p) => ({ ...p, emailTo: e.target.value }))}
+                    style={{ width: "100%", background: "#0f172a", border: "1px solid #334155", borderRadius: 6, padding: "6px 10px", color: "#e2e8f0", fontSize: 12 }}
+                  />
+                </div>
+                <button type="button" onClick={() => { savePublishDefaults(publishDefaults); setPublishSaved(true); setTimeout(() => setPublishSaved(false), 1500); }} style={{ alignSelf: "flex-start", background: "#22c55e", color: "#0f172a", border: "none", borderRadius: 8, padding: "6px 14px", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
+                  {publishSaved ? "Saved" : "Save defaults"}
+                </button>
+              </div>
             </div>
           </div>
         </>

@@ -1,4 +1,6 @@
 import { useState, useRef, useEffect } from "react";
+import { API_BASE, sendCompletionNotify } from "./config.js";
+import ShareAndScore from "./ShareAndScore.jsx";
 
 // ── Google Font ───────────────────────────────────────────────────────────────
 const fontLink = document.createElement("link");
@@ -151,14 +153,29 @@ Apply the same format and section structure as before.
 Focus improvements on the specific areas mentioned in the feedback.
 Start with "# UAT SIGNOFF — TestSentinel (Revised)"`;
 
-// ── In-memory storage (30-day aware) ─────────────────────────────────────────
-let _history = [];
-let _hid = 1;
+// ── History (persisted to localStorage for online/offline) ───────────────────
+const UAT_HISTORY_KEY = "uat-sentinel-history-v1";
+function loadHistoryFromLS() {
+  try {
+    const raw = localStorage.getItem(UAT_HISTORY_KEY);
+    if (!raw) return [];
+    const arr = JSON.parse(raw);
+    const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
+    return (Array.isArray(arr) ? arr : []).filter((h) => new Date(h.ts).getTime() > cutoff);
+  } catch {
+    return [];
+  }
+}
+let _history = loadHistoryFromLS();
+let _hid = Math.max(1, ..._history.map((h) => h.id || 0)) + 1;
 function saveToHistory(entry) {
   const record = { id: _hid++, ...entry, ts: new Date().toISOString() };
   _history.unshift(record);
   const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
-  _history = _history.filter(h => new Date(h.ts).getTime() > cutoff);
+  _history = _history.filter((h) => new Date(h.ts).getTime() > cutoff);
+  try {
+    localStorage.setItem(UAT_HISTORY_KEY, JSON.stringify(_history.slice(0, 50)));
+  } catch {}
   return record;
 }
 function getHistory() { return _history; }
@@ -255,7 +272,7 @@ function Btn({ children, variant="primary", onClick, disabled, style={}, size="m
     danger: { background:"#f8717118", color:"#f87171", border:"1px solid #f8717133" },
     outline: { background:"transparent", color:C.gold, border:`1px solid ${C.goldDim}` },
   };
-  return <button onClick={disabled?undefined:onClick} style={{...base,...variants[variant]}}>{children}</button>;
+  return <button type="button" onClick={disabled?undefined:onClick} style={{...base,...variants[variant]}}>{children}</button>;
 }
 
 function Card({ children, style={}, className="" }) {
@@ -287,7 +304,7 @@ function ModeTab({ modes, active, onChange }) {
   return (
     <div style={{ display:"inline-flex", background:C.surface, borderRadius:8, border:`1px solid ${C.border}`, overflow:"hidden", marginBottom:14 }}>
       {modes.map(m => (
-        <button key={m.id} onClick={()=>onChange(m.id)} style={{
+        <button type="button" key={m.id} onClick={()=>onChange(m.id)} style={{
           background: active===m.id ? C.gold : "transparent",
           color: active===m.id ? "#0a0a14" : C.muted,
           border:"none", padding:"7px 18px", cursor:"pointer",
@@ -307,7 +324,7 @@ function FileChip({ file, onRemove }) {
     <div style={{ display:"inline-flex", alignItems:"center", gap:6, background:c+"15", border:`1px solid ${c}33`, borderRadius:6, padding:"4px 10px", fontSize:11 }}>
       <span style={{ background:c+"33", padding:"1px 5px", borderRadius:3, color:c, fontWeight:700, fontFamily:C.mono }}>{ext}</span>
       <span style={{ color:C.subtle, maxWidth:140, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", fontFamily:C.mono }}>{file.name}</span>
-      <button onClick={onRemove} style={{ background:"none", border:"none", cursor:"pointer", color:C.muted, padding:0, fontSize:15, lineHeight:1 }}>×</button>
+      <button type="button" onClick={onRemove} style={{ background:"none", border:"none", cursor:"pointer", color:C.muted, padding:0, fontSize:15, lineHeight:1 }}>×</button>
     </div>
   );
 }
@@ -336,7 +353,7 @@ function ModelPicker({ selected, onChange }) {
   const m = MODELS.find(x=>x.id===selected)||MODELS[0];
   return (
     <div style={{ position:"relative" }}>
-      <button onClick={()=>setOpen(o=>!o)} style={{ background:C.elevated, border:`1px solid ${C.border}`, borderRadius:8, color:C.text, padding:"7px 14px", cursor:"pointer", display:"flex", alignItems:"center", gap:8, fontSize:12, fontWeight:600, fontFamily:C.font }}>
+      <button type="button" onClick={()=>setOpen(o=>!o)} style={{ background:C.elevated, border:`1px solid ${C.border}`, borderRadius:8, color:C.text, padding:"7px 14px", cursor:"pointer", display:"flex", alignItems:"center", gap:8, fontSize:12, fontWeight:600, fontFamily:C.font }}>
         <span style={{ width:7, height:7, borderRadius:"50%", background:m.color, display:"inline-block", flexShrink:0 }}/>
         {m.label}
         <span style={{ opacity:0.4, fontSize:9 }}>▾</span>
@@ -370,7 +387,7 @@ function DomainSelector({ selected, onChange }) {
       {DOMAINS.map(d=>{
         const on = selected.includes(d.id);
         return (
-          <button key={d.id} onClick={()=>toggle(d.id)} style={{
+          <button type="button" key={d.id} onClick={()=>toggle(d.id)} style={{
             background: on?`${d.color}18`:C.surface, border:`2px solid ${on?d.color:C.border}`,
             borderRadius:10, padding:"9px 15px", cursor:"pointer",
             display:"flex", alignItems:"center", gap:8, fontFamily:C.font, outline:"none",
@@ -458,9 +475,48 @@ export default function TestSentinel() {
   const [feedbackLoading, setFeedbackLoading] = useState(false);
   const [feedbackMemory, setFeedbackMemory] = useState(() => loadUATFeedbackMemory());
 
+  // Auto-publish after generation (session option)
+  const [autoPublishChannels, setAutoPublishChannels] = useState({ jira: false, telegram: false, email: false, slack: false });
+  // JIRA Connector: fetch issue key input and loading
+  const [jiraIssueKey, setJiraIssueKey] = useState("");
+  const [jiraFetchLoading, setJiraFetchLoading] = useState(false);
+  const [jiraFetchError, setJiraFetchError] = useState("");
+
   useEffect(() => { saveUATFeedbackMemoryLS(feedbackMemory); }, [feedbackMemory]);
 
   const jiraRef = useRef(); const testRef = useRef(); const docsRef = useRef(); const fbRef = useRef();
+
+  function parseJiraIssueKey(input) {
+    const s = (input || "").trim();
+    if (!s) return "";
+    const keyMatch = s.match(/\b([A-Z][A-Z0-9]*-\d+)\b/i);
+    if (keyMatch) return keyMatch[1].toUpperCase();
+    try {
+      const url = new URL(s.startsWith("http") ? s : "https://host/" + s);
+      const segments = (url.pathname || "").split("/").filter(Boolean);
+      const last = segments[segments.length - 1];
+      if (last && /^[A-Z0-9]+-\d+$/i.test(last)) return last.toUpperCase();
+    } catch (_) {}
+    return "";
+  }
+
+  const handleFetchJiraUAT = async () => {
+    const key = parseJiraIssueKey(jiraIssueKey);
+    if (!key) { setJiraFetchError("Enter a JIRA issue key (e.g. TSP-1889) or paste a JIRA URL."); return; }
+    setJiraFetchError("");
+    setJiraFetchLoading(true);
+    try {
+      const r = await fetch(`${API_BASE}/api/jira-issue/${encodeURIComponent(key)}`, { headers: { Accept: "application/json" } });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || `JIRA error ${r.status}`);
+      setJiraSubject(d.summary ? `${d.id} — ${d.summary}` : d.id || jiraIssueKey);
+      setJiraDesc([d.description, d.acceptanceCriteria ? `Acceptance criteria:\n${d.acceptanceCriteria}` : ""].filter(Boolean).join("\n\n") || "(No description)");
+      setJiraMode("type");
+    } catch (e) {
+      setJiraFetchError(e.message || "JIRA fetch failed");
+    }
+    setJiraFetchLoading(false);
+  };
 
   const addFiles = async (fl, setF, setC) => {
     const { files, contents } = await readFiles(fl);
@@ -491,15 +547,14 @@ export default function TestSentinel() {
     return false;
   };
 
-  const callClaude = async (systemPrompt, userMessage) => {
-    const apiBase = process.env.REACT_APP_API_URL || "";
-    const res = await fetch(`${apiBase}/api/generate`, {
+  const callClaude = async (systemPrompt, userMessage, maxTokens = 8000) => {
+    const res = await fetch(`${API_BASE}/api/generate`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         system: systemPrompt,
         messages: [{ role: "user", content: userMessage }],
-        max_tokens: 4000,
+        max_tokens: maxTokens,
       }),
     });
     const text = await res.text();
@@ -556,6 +611,7 @@ export default function TestSentinel() {
       setStep(3);
       setView("result");
       setStatusMsg("");
+      await sendCompletionNotify("UAT Agent", jiraSubject || jiraIssueKey || "UAT Signoff");
     } catch(e) { setStatusMsg("Error: "+e.message); }
     finally { setLoading(false); }
   };
@@ -577,10 +633,10 @@ export default function TestSentinel() {
         signoff: improved
       });
       setResult({ signoff:improved, id:entry.id, domains:result.domains });
-      // Remember feedback for future UATs
       const fbSummary = feedbackMode === "type" ? feedbackText.trim() : feedbackFC.map(f => `[${f.name}] ${f.content.slice(0, 100)}`).join("; ");
       if (fbSummary) setFeedbackMemory(prev => [...prev, fbSummary.slice(0, 200)].slice(-20));
       setFeedbackText(""); setFeedbackFiles([]); setFeedbackFC([]);
+      await sendCompletionNotify("UAT Agent", (jiraSubject || jiraIssueKey || "UAT Signoff") + " (revised)");
     } catch(e) { console.error(e); }
     finally { setFeedbackLoading(false); }
   };
@@ -591,6 +647,7 @@ export default function TestSentinel() {
     setSelectedDomains([]); setClarifyRaw(""); setDraftObjective(""); setEditedObjective("");
     setClarifyAnswers(""); setResult(null); setStatusMsg(""); setFeedbackText(""); setFeedbackFiles([]); setFeedbackFC([]);
     setJiraMode("type"); setTestMode("type"); setDocsMode("type"); setFeedbackMode("type");
+    setJiraIssueKey(""); setJiraFetchError("");
   };
 
   const INPUT_MODES = [{id:"type",icon:"⌨️",label:"Type / Paste"},{id:"upload",icon:"📎",label:"Upload File"}];
@@ -617,7 +674,7 @@ export default function TestSentinel() {
         {feedbackMemory.length > 0 && (
           <div style={{ marginTop:16, display:"inline-flex", alignItems:"center", gap:8, background:"#052E16", border:"1px solid #16A34A22", borderRadius:9, padding:"8px 14px" }}>
             <span style={{ fontSize:11, color:"#4ADE80", fontWeight:600 }}>🧠 {feedbackMemory.length} feedback item{feedbackMemory.length>1?"s":""} remembered</span>
-            <button onClick={()=>setFeedbackMemory([])} style={{ background:"none", border:"1px solid #EF444433", borderRadius:6, padding:"2px 8px", color:"#EF4444", fontSize:10, cursor:"pointer" }}>Clear</button>
+            <button type="button" onClick={()=>setFeedbackMemory([])} style={{ background:"none", border:"1px solid #EF444433", borderRadius:6, padding:"2px 8px", color:"#EF4444", fontSize:10, cursor:"pointer" }}>Clear</button>
           </div>
         )}
       </div>
@@ -687,7 +744,34 @@ export default function TestSentinel() {
 
       {/* ── Step 0: Inputs ── */}
       {step===0 && (
-        <div className="fade-in">
+        <div className="fade-in" role="presentation" onKeyDown={(e)=>{ if (e.key==="Enter" && e.target.tagName!=="TEXTAREA") e.preventDefault(); }}>
+          {/* JIRA Connector */}
+          <Card style={{ marginBottom:16 }}>
+            <SectionHeader icon="🔵" title="JIRA Connector" tag="Fetch issue" tagColor="#60a5fa"/>
+            <div style={{ padding:18 }}>
+              <div style={{ display:"flex", gap:8, flexWrap:"wrap", alignItems:"center" }}>
+                <input
+                  type="text"
+                  placeholder="e.g. TSP-1889 or paste JIRA browse URL"
+                  value={jiraIssueKey}
+                  onChange={(e)=>setJiraIssueKey(e.target.value)}
+                  onKeyDown={(e)=>{ if (e.key==="Enter") { e.preventDefault(); handleFetchJiraUAT(); } }}
+                  style={{ flex:1, minWidth:200, ...inp }}
+                />
+                <button type="button" onClick={handleFetchJiraUAT} disabled={jiraFetchLoading} style={{ padding:"8px 16px", borderRadius:8, fontSize:12, fontWeight:600, cursor: jiraFetchLoading?"wait":"pointer", border:"none", background:"#0052CC", color:"#fff" }}>
+                  {jiraFetchLoading ? "Fetching…" : "↓ Fetch"}
+                </button>
+              </div>
+              {jiraFetchError && <div style={{ marginTop:8, fontSize:11, color:"#f87171" }}>{jiraFetchError}</div>}
+              {(jiraSubject || jiraDesc) && (
+                <div style={{ marginTop:10, padding:12, background:C.surface, borderRadius:8, fontSize:12, color:C.text }}>
+                  <span style={{ color:"#22c55e", fontWeight:600 }}>✓ JIRA fetched — subject & description filled below</span>
+                </div>
+              )}
+              <div style={{ marginTop:8, fontSize:11, color:C.muted }}>Fetch summary & description into JIRA Details. Configure JIRA in Connectors (top bar).</div>
+            </div>
+          </Card>
+
           {/* Domain Scope */}
           <Card style={{ marginBottom:16 }}>
             <SectionHeader icon="🎯" title="UAT Domain Scope" tag="Required" tagColor="#f87171"/>
@@ -765,6 +849,21 @@ export default function TestSentinel() {
             <div style={{ display:"flex", gap:28, alignItems:"center", flexWrap:"wrap" }}>
               <span style={{ fontSize:10, color:C.muted, fontWeight:700, textTransform:"uppercase", letterSpacing:"0.08em", fontFamily:C.font }}>Options</span>
               <Toggle on={webSearch} onChange={setWebSearch} icon="🌐" label="Enable Web Search (NPCI / RBI docs)"/>
+            </div>
+            <div style={{ marginTop:14, paddingTop:14, borderTop:`1px solid ${C.border}` }}>
+              <div style={{ fontSize:10, color:C.muted, fontWeight:700, textTransform:"uppercase", letterSpacing:"0.08em", fontFamily:C.font, marginBottom:10 }}>After generation, auto-publish to</div>
+              <div style={{ display:"flex", flexWrap:"wrap", gap:16 }}>
+                {["jira","telegram","email","slack"].map((ch) => (
+                  <label key={ch} style={{ display:"flex", alignItems:"center", gap:6, cursor:"pointer", fontSize:12, color:C.text }}>
+                    <input type="checkbox" checked={!!autoPublishChannels[ch]} onChange={(e)=>setAutoPublishChannels((p)=>({ ...p, [ch]: e.target.checked }))} />
+                    {ch==="jira"&&"JIRA"}
+                    {ch==="telegram"&&"Telegram"}
+                    {ch==="email"&&"Email"}
+                    {ch==="slack"&&"Slack"}
+                  </label>
+                ))}
+              </div>
+              <div style={{ fontSize:10, color:C.muted, marginTop:6 }}>Set default destinations in Connectors (top bar).</div>
             </div>
           </Card>
 
@@ -885,6 +984,15 @@ export default function TestSentinel() {
         {result?.signoff && <MarkdownRenderer content={result.signoff}/>}
       </Card>
 
+      {result?.signoff && (
+        <ShareAndScore
+          docType="uat"
+          title="UAT Signoff"
+          content={result.signoff}
+          autoPublish={Object.keys(autoPublishChannels).filter((k) => autoPublishChannels[k])}
+        />
+      )}
+
       {/* ── Feedback Section ── */}
       <Card style={{ marginBottom:20, border:`1px solid #a78bfa44` }}>
         <SectionHeader icon="💬" title="Improve This Signoff" tag="Feedback" tagColor="#a78bfa"/>
@@ -906,7 +1014,7 @@ export default function TestSentinel() {
             <div style={{ marginTop:12, padding:"10px 14px", background:"#052E16", border:"1px solid #16A34A22", borderRadius:9 }}>
               <div style={{ fontSize:11, color:"#16A34A", fontWeight:600, marginBottom:6 }}>🧠 REMEMBERED FEEDBACK ({feedbackMemory.length})</div>
               {feedbackMemory.map((f,i) => <div key={i} style={{ fontSize:11, color:"#4ADE80", marginBottom:2 }}>• {f.slice(0,120)}{f.length>120?"…":""}</div>)}
-              <button onClick={()=>setFeedbackMemory([])} style={{ marginTop:6, background:"none", border:"1px solid #EF444433", borderRadius:7, padding:"3px 10px", color:"#EF4444", fontSize:10, cursor:"pointer" }}>Clear memory</button>
+              <button type="button" onClick={()=>setFeedbackMemory([])} style={{ marginTop:6, background:"none", border:"1px solid #EF444433", borderRadius:7, padding:"3px 10px", color:"#EF4444", fontSize:10, cursor:"pointer" }}>Clear memory</button>
             </div>
           )}
           <div style={{ marginTop:14 }}>
@@ -1002,7 +1110,7 @@ export default function TestSentinel() {
             { id:"new", label:"New Session" },
             { id:"history", label:`History${getHistory().length?` (${getHistory().length})`:""}`},
           ].map(tab=>(
-            <button key={tab.id} onClick={()=>{ if(tab.id==="new"){resetAll();} setView(tab.id); }} style={{
+            <button type="button" key={tab.id} onClick={()=>{ if(tab.id==="new"){resetAll();} setView(tab.id); }} style={{
               background: view===tab.id?`${C.gold}22`:"transparent",
               color: view===tab.id?C.gold:C.muted,
               border: view===tab.id?`1px solid ${C.gold}44`:"1px solid transparent",

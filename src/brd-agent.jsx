@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from "react";
-import { API_BASE } from "./config.js";
+import { API_BASE, sendCompletionNotify } from "./config.js";
+import ShareAndScore from "./ShareAndScore.jsx";
 
 // ── Domains (Feedback 2) ─────────────────────────────────────────────────────
 const DOMAINS = [
@@ -245,6 +246,9 @@ export default function BRDAgent() {
   const [feedbackUploading, setFeedbackUploading] = useState(false);
   const [feedbackMemory, setFeedbackMemory] = useState(() => loadFeedbackMemory());
 
+  // Auto-publish after generation (session option)
+  const [autoPublishChannels, setAutoPublishChannels] = useState({ jira: false, telegram: false, email: false, slack: false });
+
   const fileRef = useRef();
   const feedbackFileRef = useRef();
 
@@ -324,6 +328,7 @@ export default function BRDAgent() {
       setHistory((prev) => [entry, ...prev].slice(0, 50));
       setPhase("output");
       setStatusMsg("");
+      await sendCompletionNotify("BRD Agent", jiraId || subject || "BRD");
     } catch (e) { setError("Error: " + e.message); setPhase("input"); }
     setLoading(false);
   };
@@ -349,13 +354,11 @@ export default function BRDAgent() {
     if (!feedbackText.trim()) { setError("Enter feedback or upload a document."); return; }
     setLoading(true); setStatusMsg("Improving BRD with feedback…");
     try {
-      const improvePrompt = `You have an existing BRD. Apply the following feedback to improve it.\n\nFEEDBACK:\n${feedbackText}\n\nEXISTING BRD:\n${brdRaw.slice(0, 6000)}\n\nGenerate the FULL improved 24-section BRD. Apply all feedback. Return the complete BRD in markdown.`;
-      const improved = await callLLM(BRD_SYSTEM, improvePrompt, 8000);
+      const improvePrompt = `You have an existing BRD. Apply the following feedback to improve it.\n\nFEEDBACK:\n${feedbackText}\n\nEXISTING BRD:\n${brdRaw.slice(0, 24000)}\n\nGenerate the FULL improved 24-section BRD. Apply all feedback. Return the complete BRD in markdown. Do NOT truncate or shorten any section.`;
+      const improved = await callLLM(BRD_SYSTEM, improvePrompt, 16000);
       setBrdRaw(improved);
-      // Remember feedback for future BRDs
       const newMem = [...feedbackMemory, feedbackText.trim().slice(0, 200)].slice(-20);
       setFeedbackMemory(newMem);
-      // Update history
       setHistory((prev) => {
         const updated = [...prev];
         if (updated.length > 0) updated[0] = { ...updated[0], brd: improved };
@@ -363,6 +366,7 @@ export default function BRDAgent() {
       });
       setFeedbackText("");
       setStatusMsg("");
+      await sendCompletionNotify("BRD Agent", jiraId || subject || "BRD");
     } catch (e) { setError("Error: " + e.message); }
     setLoading(false);
   };
@@ -382,7 +386,7 @@ export default function BRDAgent() {
 
   // ── Reset ──
   const reset = () => {
-    setPhase("input"); setJiraId(""); setJiraData(null); setSubject(""); setDomain("switch"); setDescription(""); setAc(""); setAttachments([]); setQuestions([]); setAnswers({}); setBrdRaw(""); setError(""); setFeedbackText("");
+    setPhase("input"); setJiraId(""); setJiraData(null); setSubject(""); setDomain("switch"); setDescription(""); setAc(""); setAttachments([]); setQuestions([]); setAnswers({}); setBrdRaw(""); setError(""); setFeedbackText(""); setAutoPublishChannels({ jira: false, telegram: false, email: false, slack: false });
   };
 
   const loadHistoryItem = (item) => {
@@ -407,10 +411,10 @@ export default function BRDAgent() {
         </div>
         <span style={{ fontSize: 11, background: "rgba(120,100,255,0.15)", border: `1px solid ${C.border2}`, color: C.purpleLight, borderRadius: 12, padding: "3px 9px" }}>v2.0</span>
         <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
-          <button onClick={() => setShowHistory((s) => !s)} style={{ padding: "7px 14px", borderRadius: 10, fontSize: 12, fontWeight: 500, cursor: "pointer", border: `1px solid ${C.border2}`, background: "transparent", color: C.text2, fontFamily: "inherit" }}>
+          <button type="button" onClick={() => setShowHistory((s) => !s)} style={{ padding: "7px 14px", borderRadius: 10, fontSize: 12, fontWeight: 500, cursor: "pointer", border: `1px solid ${C.border2}`, background: "transparent", color: C.text2, fontFamily: "inherit" }}>
             📋 History ({history.length})
           </button>
-          <button onClick={reset} style={{ padding: "7px 14px", borderRadius: 10, fontSize: 12, fontWeight: 600, cursor: "pointer", border: "none", background: C.purple, color: "#fff", fontFamily: "inherit" }}>+ New BRD</button>
+          <button type="button" onClick={reset} style={{ padding: "7px 14px", borderRadius: 10, fontSize: 12, fontWeight: 600, cursor: "pointer", border: "none", background: C.purple, color: "#fff", fontFamily: "inherit" }}>+ New BRD</button>
         </div>
       </div>
 
@@ -429,7 +433,7 @@ export default function BRDAgent() {
               </div>
               <div style={{ display: "flex", gap: 8 }}>
                 <input value={jiraId} onChange={(e) => setJiraId(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleFetchJira()} placeholder="e.g. TSP-1889 or paste JIRA browse URL" style={{ flex: 1, background: C.bg3, border: `1px solid ${C.border2}`, color: C.text, fontSize: 13, padding: "8px 11px", borderRadius: 10, fontFamily: "inherit" }} />
-                <button onClick={handleFetchJira} disabled={loading} style={{ padding: "8px 16px", borderRadius: 10, fontSize: 12, fontWeight: 600, cursor: "pointer", border: "none", background: "rgba(79,163,227,0.1)", color: "#4fa3e3", fontFamily: "inherit" }}>↓ Fetch</button>
+                <button type="button" onClick={handleFetchJira} disabled={loading} style={{ padding: "8px 16px", borderRadius: 10, fontSize: 12, fontWeight: 600, cursor: "pointer", border: "none", background: "rgba(79,163,227,0.1)", color: "#4fa3e3", fontFamily: "inherit" }}>↓ Fetch</button>
               </div>
               {jiraData && (
                 <div style={{ marginTop: 10, padding: 12, background: C.bg3, borderRadius: 10, fontSize: 12, color: C.text2 }}>
@@ -476,7 +480,7 @@ export default function BRDAgent() {
               <div style={{ marginBottom: 14 }}>
                 <label style={{ fontSize: 11, fontWeight: 600, color: C.text3, textTransform: "uppercase", letterSpacing: "0.05em" }}>Attach Files</label>
                 <div style={{ marginTop: 6 }}>
-                  <button onClick={() => fileRef.current?.click()} style={{ background: C.bg3, border: `1.5px dashed ${C.border2}`, borderRadius: 10, padding: "10px 16px", color: C.text3, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>📎 Click to attach (.txt .md .csv .json)</button>
+                  <button type="button" onClick={() => fileRef.current?.click()} style={{ background: C.bg3, border: `1.5px dashed ${C.border2}`, borderRadius: 10, padding: "10px 16px", color: C.text3, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>📎 Click to attach (.txt .md .csv .json)</button>
                   <input ref={fileRef} type="file" multiple accept=".txt,.md,.csv,.json,.xml" style={{ display: "none" }} onChange={handleFiles} />
                 </div>
                 {attachments.length > 0 && (
@@ -497,6 +501,22 @@ export default function BRDAgent() {
                 </div>
               </div>
 
+              <div style={{ marginBottom: 14, padding: "10px 14px", background: C.bg3, borderRadius: 10, border: `1px solid ${C.border2}` }}>
+                <div style={{ fontSize: 11, color: C.text3, fontWeight: 600, marginBottom: 8 }}>After generation, auto-publish to</div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 12 }}>
+                  {["jira", "telegram", "email", "slack"].map((ch) => (
+                    <label key={ch} style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer", fontSize: 12, color: C.text2 }}>
+                      <input type="checkbox" checked={!!autoPublishChannels[ch]} onChange={(e) => setAutoPublishChannels((p) => ({ ...p, [ch]: e.target.checked }))} />
+                      {ch === "jira" && "JIRA"}
+                      {ch === "telegram" && "Telegram"}
+                      {ch === "email" && "Email"}
+                      {ch === "slack" && "Slack"}
+                    </label>
+                  ))}
+                </div>
+                <div style={{ fontSize: 10, color: C.text3, marginTop: 4 }}>Set default destinations in Connectors (top bar).</div>
+              </div>
+
               {feedbackMemory.length > 0 && (
                 <div style={{ padding: "10px 14px", background: "rgba(62,207,142,0.08)", border: "1px solid rgba(62,207,142,0.2)", borderRadius: 10, marginBottom: 14 }}>
                   <div style={{ fontSize: 11, color: C.green, fontWeight: 600, marginBottom: 4 }}>🧠 {feedbackMemory.length} feedback item{feedbackMemory.length > 1 ? "s" : ""} remembered from previous BRDs</div>
@@ -505,7 +525,7 @@ export default function BRDAgent() {
               )}
 
               <div style={{ display: "flex", justifyContent: "flex-end" }}>
-                <button onClick={handleProceed} disabled={loading} style={{ padding: "11px 28px", borderRadius: 10, fontSize: 14, fontWeight: 700, cursor: loading ? "not-allowed" : "pointer", border: "none", background: loading ? C.bg3 : C.purple, color: loading ? C.text3 : "#fff", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 8 }}>
+                <button type="button" onClick={handleProceed} disabled={loading} style={{ padding: "11px 28px", borderRadius: 10, fontSize: 14, fontWeight: 700, cursor: loading ? "not-allowed" : "pointer", border: "none", background: loading ? C.bg3 : C.purple, color: loading ? C.text3 : "#fff", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 8 }}>
                   {loading ? <><Spinner /> {statusMsg}</> : "Gather & Generate →"}
                 </button>
               </div>
@@ -528,8 +548,8 @@ export default function BRDAgent() {
               </div>
             ))}
             <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 16 }}>
-              <button onClick={() => generateBRD()} disabled={loading} style={{ padding: "9px 18px", borderRadius: 10, fontSize: 13, fontWeight: 600, cursor: "pointer", border: `1px solid ${C.border2}`, background: "transparent", color: C.text2, fontFamily: "inherit" }}>Skip All & Generate</button>
-              <button onClick={() => generateBRD()} disabled={loading} style={{ padding: "9px 18px", borderRadius: 10, fontSize: 13, fontWeight: 700, cursor: "pointer", border: "none", background: C.purple, color: "#fff", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 8 }}>
+              <button type="button" onClick={() => generateBRD()} disabled={loading} style={{ padding: "9px 18px", borderRadius: 10, fontSize: 13, fontWeight: 600, cursor: "pointer", border: `1px solid ${C.border2}`, background: "transparent", color: C.text2, fontFamily: "inherit" }}>Skip All & Generate</button>
+              <button type="button" onClick={() => generateBRD()} disabled={loading} style={{ padding: "9px 18px", borderRadius: 10, fontSize: 13, fontWeight: 700, cursor: "pointer", border: "none", background: C.purple, color: "#fff", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 8 }}>
                 {loading ? <><Spinner /> {statusMsg}</> : "Generate BRD →"}
               </button>
             </div>
@@ -546,19 +566,21 @@ export default function BRDAgent() {
 
         {/* ── PHASE: OUTPUT ── */}
         {(phase === "output" || brdRaw) && phase !== "input" && phase !== "clarify" && phase !== "generating" && (
-          <div style={{ animation: "fadeUp .4s ease" }}>
+          <div>
             {/* Action bar */}
             <div style={{ display: "flex", gap: 8, marginBottom: 16, alignItems: "center", flexWrap: "wrap" }}>
               <span style={{ fontSize: 11, background: "rgba(62,207,142,0.1)", color: C.green, borderRadius: 12, padding: "3px 9px", fontWeight: 500 }}>BRD Ready</span>
-              <button onClick={handleCopy} style={{ marginLeft: "auto", padding: "9px 16px", borderRadius: 10, fontSize: 12, fontWeight: 600, cursor: "pointer", border: `1px solid ${C.border2}`, background: "transparent", color: copyDone ? C.green : C.text2, fontFamily: "inherit" }}>{copyDone ? "✓ Copied!" : "⎘ Copy Markdown"}</button>
-              <button onClick={handleDownload} style={{ padding: "9px 16px", borderRadius: 10, fontSize: 12, fontWeight: 600, cursor: "pointer", border: `1px solid ${C.border2}`, background: "transparent", color: C.text2, fontFamily: "inherit" }}>↓ Download .md</button>
-              <button onClick={reset} style={{ padding: "9px 16px", borderRadius: 10, fontSize: 12, fontWeight: 700, cursor: "pointer", border: "none", background: C.purple, color: "#fff", fontFamily: "inherit" }}>+ New BRD</button>
+              <button type="button" onClick={handleCopy} style={{ marginLeft: "auto", padding: "9px 16px", borderRadius: 10, fontSize: 12, fontWeight: 600, cursor: "pointer", border: `1px solid ${C.border2}`, background: "transparent", color: copyDone ? C.green : C.text2, fontFamily: "inherit" }}>{copyDone ? "✓ Copied!" : "⎘ Copy Markdown"}</button>
+              <button type="button" onClick={handleDownload} style={{ padding: "9px 16px", borderRadius: 10, fontSize: 12, fontWeight: 600, cursor: "pointer", border: `1px solid ${C.border2}`, background: "transparent", color: C.text2, fontFamily: "inherit" }}>↓ Download .md</button>
+              <button type="button" onClick={reset} style={{ padding: "9px 16px", borderRadius: 10, fontSize: 12, fontWeight: 700, cursor: "pointer", border: "none", background: C.purple, color: "#fff", fontFamily: "inherit" }}>+ New BRD</button>
             </div>
 
             {/* BRD document */}
             <div style={{ background: C.bg2, border: `1px solid ${C.border}`, borderRadius: 14, padding: "28px 32px", marginBottom: 20 }}>
               {renderBRDMarkdown(brdRaw)}
             </div>
+
+            {brdRaw && <ShareAndScore docType="brd" title={subject} content={brdRaw} autoPublish={Object.keys(autoPublishChannels).filter((k) => autoPublishChannels[k])} />}
 
             {/* Feedback section (Feedback 4) */}
             <div style={{ background: C.bg2, border: `1px solid ${C.border}`, borderRadius: 14, padding: 20 }}>
@@ -572,11 +594,11 @@ export default function BRDAgent() {
               <textarea value={feedbackText} onChange={(e) => setFeedbackText(e.target.value)} placeholder="Paste your feedback here, or upload a .docx below…" rows={4} style={{ width: "100%", background: C.bg3, border: `1px solid ${C.border2}`, color: C.text, fontSize: 13, padding: "9px 11px", borderRadius: 10, fontFamily: "inherit", resize: "vertical", marginBottom: 10 }} />
               <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                 <input ref={feedbackFileRef} type="file" accept=".docx" style={{ display: "none" }} onChange={handleFeedbackDocx} />
-                <button onClick={() => feedbackFileRef.current?.click()} disabled={feedbackUploading} style={{ background: C.bg3, border: `1px solid ${C.border2}`, borderRadius: 10, padding: "7px 14px", color: "#4fa3e3", fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>
+                <button type="button" onClick={() => feedbackFileRef.current?.click()} disabled={feedbackUploading} style={{ background: C.bg3, border: `1px solid ${C.border2}`, borderRadius: 10, padding: "7px 14px", color: "#4fa3e3", fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>
                   {feedbackUploading ? "… Extracting…" : "📎 Upload .docx"}
                 </button>
                 <div style={{ marginLeft: "auto" }}>
-                  <button onClick={handleApplyFeedback} disabled={loading || !feedbackText.trim()} style={{ padding: "10px 22px", borderRadius: 10, fontSize: 13, fontWeight: 700, cursor: !feedbackText.trim() || loading ? "not-allowed" : "pointer", border: "none", background: !feedbackText.trim() || loading ? C.bg3 : C.purple, color: !feedbackText.trim() || loading ? C.text3 : "#fff", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 8 }}>
+                  <button type="button" onClick={handleApplyFeedback} disabled={loading || !feedbackText.trim()} style={{ padding: "10px 22px", borderRadius: 10, fontSize: 13, fontWeight: 700, cursor: !feedbackText.trim() || loading ? "not-allowed" : "pointer", border: "none", background: !feedbackText.trim() || loading ? C.bg3 : C.purple, color: !feedbackText.trim() || loading ? C.text3 : "#fff", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 8 }}>
                     {loading ? <><Spinner /> {statusMsg}</> : "✨ Apply Feedback & Improve"}
                   </button>
                 </div>
@@ -585,7 +607,7 @@ export default function BRDAgent() {
                 <div style={{ marginTop: 12, padding: "10px 14px", background: "rgba(62,207,142,0.08)", border: "1px solid rgba(62,207,142,0.2)", borderRadius: 10 }}>
                   <div style={{ fontSize: 11, color: C.green, fontWeight: 600, marginBottom: 4 }}>🧠 Remembered Feedback ({feedbackMemory.length})</div>
                   {feedbackMemory.map((f, i) => <div key={i} style={{ fontSize: 11, color: C.text3, marginBottom: 2 }}>• {f.slice(0, 100)}{f.length > 100 ? "…" : ""}</div>)}
-                  <button onClick={() => { setFeedbackMemory([]); }} style={{ marginTop: 6, background: "none", border: `1px solid rgba(255,95,95,0.3)`, borderRadius: 8, padding: "3px 10px", color: C.red, fontSize: 11, cursor: "pointer", fontFamily: "inherit" }}>Clear memory</button>
+                  <button type="button" onClick={() => { setFeedbackMemory([]); }} style={{ marginTop: 6, background: "none", border: `1px solid rgba(255,95,95,0.3)`, borderRadius: 8, padding: "3px 10px", color: C.red, fontSize: 11, cursor: "pointer", fontFamily: "inherit" }}>Clear memory</button>
                 </div>
               )}
             </div>
@@ -600,7 +622,7 @@ export default function BRDAgent() {
           <div style={{ position: "fixed", top: 0, right: 0, bottom: 0, width: 400, background: C.bg2, borderLeft: `1px solid ${C.border}`, zIndex: 100, display: "flex", flexDirection: "column", animation: "fadeUp .25s ease" }}>
             <div style={{ padding: "16px 20px", borderBottom: `1px solid ${C.border}`, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
               <span style={{ fontSize: 14, fontWeight: 700 }}>📋 BRD History</span>
-              <button onClick={() => setShowHistory(false)} style={{ background: C.bg3, border: "none", borderRadius: 8, width: 28, height: 28, color: C.text2, fontSize: 18, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>×</button>
+              <button type="button" onClick={() => setShowHistory(false)} style={{ background: C.bg3, border: "none", borderRadius: 8, width: 28, height: 28, color: C.text2, fontSize: 18, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>×</button>
             </div>
             <div style={{ flex: 1, overflow: "auto", padding: "12px 14px" }}>
               {history.length === 0 ? (

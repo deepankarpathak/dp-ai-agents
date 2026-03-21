@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from "react";
-import { API_BASE } from "./config.js";
+import { API_BASE, sendCompletionNotify } from "./config.js";
+import ShareAndScore from "./ShareAndScore.jsx";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 const MODELS = [
@@ -124,7 +125,7 @@ const sectionPrompt = (keys, req) => {
   };
   const fields = keys.map(k=>`"${k}": "..."`).join(",\n  ");
   const descs  = keys.map(k=>`- ${k}: ${D[k]}`).join("\n");
-  return `Generate ONLY these PRD sections:\n\nREQUIREMENT:\n${req}\n\nReturn JSON with exactly:\n{\n  ${fields}\n}\n\n${descs}\n\nUse \\n for line breaks. Keep each value under 1200 chars. Return ONLY the JSON object.`;
+  return `Generate ONLY these PRD sections:\n\nREQUIREMENT:\n${req}\n\nReturn JSON with exactly:\n{\n  ${fields}\n}\n\n${descs}\n\nUse \\n for line breaks. Keep each value under 3000 chars. Be thorough — do NOT truncate or abbreviate. Return ONLY the JSON object.`;
 };
 
 const CLARIFY_PROMPT = `Give exactly 4 short clarifying questions to improve the PRD. Focus on UPI-specific technical gaps or regulatory ambiguity.\nReturn ONLY a JSON array: ["q1","q2","q3","q4"]`;
@@ -346,6 +347,12 @@ export default function PRDAgent() {
   const [termAnswers, setTermAnswers]           = useState([]);
   const [preFeedbackCtx, setPreFeedbackCtx]     = useState("");
 
+  // ── JIRA Connector & auto-publish ─────────────────────────────────────────
+  const [jiraIssueKey, setJiraIssueKey]         = useState("");
+  const [jiraFetchLoading, setJiraFetchLoading] = useState(false);
+  const [jiraFetchError, setJiraFetchError]     = useState("");
+  const [autoPublishChannels, setAutoPublishChannels] = useState({ jira: false, telegram: false, email: false, slack: false });
+
   const fileRef   = useRef();
   const bottomRef = useRef();
 
@@ -359,6 +366,37 @@ export default function PRDAgent() {
     r.onerror=()=>res(`[Could not read: ${f.name}]`);
     r.readAsText(f);
   });
+
+  function parseJiraIssueKey(input) {
+    const s = (input || "").trim();
+    if (!s) return "";
+    const keyMatch = s.match(/\b([A-Z][A-Z0-9]*-\d+)\b/i);
+    if (keyMatch) return keyMatch[1].toUpperCase();
+    try {
+      const url = new URL(s.startsWith("http") ? s : "https://host/" + s);
+      const segments = (url.pathname || "").split("/").filter(Boolean);
+      const last = segments[segments.length - 1];
+      if (last && /^[A-Z0-9]+-\d+$/i.test(last)) return last.toUpperCase();
+    } catch (_) {}
+    return "";
+  }
+
+  const handleFetchJiraPRD = async () => {
+    const key = parseJiraIssueKey(jiraIssueKey);
+    if (!key) { setJiraFetchError("Enter a JIRA issue key (e.g. TSP-1889) or paste a JIRA URL."); return; }
+    setJiraFetchError("");
+    setJiraFetchLoading(true);
+    try {
+      const r = await fetch(`${API_BASE}/api/jira-issue/${encodeURIComponent(key)}`, { headers: { Accept: "application/json" } });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || `JIRA error ${r.status}`);
+      const parts = [d.summary ? `JIRA: ${d.id} — ${d.summary}` : `JIRA: ${d.id}`, d.description, d.acceptanceCriteria ? `Acceptance criteria:\n${d.acceptanceCriteria}` : ""].filter(Boolean);
+      setInput(parts.join("\n\n"));
+    } catch (e) {
+      setJiraFetchError(e.message || "JIRA fetch failed");
+    }
+    setJiraFetchLoading(false);
+  };
 
   const callAPI = async (messages, sys) => {
     const res = await fetch(`${API_BASE}/api/generate`,{
@@ -495,6 +533,7 @@ export default function PRDAgent() {
 
       if (skipClarify) {
         setPhase("done");
+        await sendCompletionNotify("PRD Agent", fullPrd.title || input.slice(0, 60) || "PRD");
       } else {
         setLoadingMsg("Generating clarifying questions…");
         const summary = Object.entries(sections).slice(0,3).map(([k,v])=>`${k}: ${String(v).slice(0,200)}`).join("\n");
@@ -538,6 +577,7 @@ export default function PRDAgent() {
       if (otherFeedback.trim()) setFeedbackMemory(prev => [...prev, otherFeedback.trim().slice(0, 200)].slice(-20));
 
       setPhase("done");
+      await sendCompletionNotify("PRD Agent", refined.title || input.slice(0, 60) || "PRD");
     } catch(e) { setError("Error: "+e.message); setPhase("clarifying"); }
     setLoading(false); setLoadingMsg("");
   };
@@ -562,7 +602,7 @@ export default function PRDAgent() {
       for (let i=0; i<BATCHES.length; i++) {
         setLoadingMsg(`Improving batch ${i+1}/${BATCHES.length}…`);
         setProgress({ done:i, total:BATCHES.length });
-        const improvPrompt = `You have an existing PRD. Apply the following feedback instructions to improve it.\n\nFEEDBACK TO APPLY:\n${combined}\n\nEXISTING PRD SECTIONS (for context):\n${currentPrdText.slice(0,3000)}\n\n${sectionPrompt(BATCHES[i], convHistory[0]?.content||input)}`;
+        const improvPrompt = `You have an existing PRD. Apply the following feedback instructions to improve it.\n\nFEEDBACK TO APPLY:\n${combined}\n\nEXISTING PRD SECTIONS (for context):\n${currentPrdText.slice(0,12000)}\n\n${sectionPrompt(BATCHES[i], convHistory[0]?.content||input)}`;
         const raw = await callAPI([{ role:"user", content:improvPrompt }]);
         let parsed; try{ parsed=repairJSON(raw); }catch{ parsed={}; }
         improved = { ...improved, ...parsed };
@@ -591,6 +631,7 @@ export default function PRDAgent() {
       setSelectedPresets(new Set());
       setManualFeedback("");
       setPhase("done");
+      await sendCompletionNotify("PRD Agent", (improved.title || input.slice(0, 60) || "PRD") + " (improved)");
     } catch(e) { setError("Error: "+e.message); setPhase("done"); }
     setLoading(false); setLoadingMsg("");
   };
@@ -746,6 +787,24 @@ export default function PRDAgent() {
 
       <div style={{ maxWidth:920, margin:"0 auto", padding:"28px 20px 100px" }}>
 
+        {/* ── JIRA Connector ── */}
+        <div style={{ background:"#0D1626", border:"1px solid #1E293B", borderRadius:14, padding:24, marginBottom:20, animation:"fadeUp .4s ease" }}>
+          <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:12 }}>
+            <div style={{ width:28, height:28, borderRadius:6, background:"linear-gradient(135deg,#0052cc,#2684ff)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:12, fontWeight:700, color:"#fff" }}>J</div>
+            <span style={{ fontSize:14, fontWeight:600, color:"#F1F5F9" }}>JIRA Connector</span>
+          </div>
+          <div style={{ display:"flex", gap:8, flexWrap:"wrap", alignItems:"center" }}>
+            <input type="text" placeholder="e.g. TSP-1889 or paste JIRA browse URL" value={jiraIssueKey} onChange={e=>setJiraIssueKey(e.target.value)} onKeyDown={e=>{ if (e.key==="Enter") { e.preventDefault(); handleFetchJiraPRD(); } }}
+              style={{ flex:1, minWidth:200, background:"#070E1A", border:"1px solid #1E3A5F", borderRadius:8, color:"#CBD5E1", fontSize:13, padding:"8px 12px" }} />
+            <button type="button" onClick={handleFetchJiraPRD} disabled={jiraFetchLoading}
+              style={{ padding:"8px 16px", borderRadius:8, fontSize:12, fontWeight:600, cursor:jiraFetchLoading?"wait":"pointer", border:"none", background:"#0052CC", color:"#fff" }}>
+              {jiraFetchLoading ? "Fetching…" : "↓ Fetch"}
+            </button>
+          </div>
+          {jiraFetchError && <div style={{ marginTop:8, fontSize:11, color:"#f87171" }}>{jiraFetchError}</div>}
+          <div style={{ marginTop:8, fontSize:11, color:"#64748b" }}>Fetch summary & description into the requirement field. Configure JIRA in Connectors (top bar).</div>
+        </div>
+
         {/* ── STEP 1: INPUT ── */}
         <div style={{ background:"#0D1626", border:"1px solid #1E293B", borderRadius:14, padding:24, marginBottom:20, animation:"fadeUp .4s ease" }}>
           <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:16 }}>
@@ -785,6 +844,21 @@ export default function PRDAgent() {
               </div>
               <span style={{ fontSize:12, color:skipClarify?"#F59E0B":"#475569", fontWeight:skipClarify?600:400 }}>Skip clarification &amp; go straight to Done</span>
             </label>
+          </div>
+          <div style={{ marginTop:12, paddingTop:12, borderTop:"1px solid #1E293B" }}>
+            <div style={{ fontSize:11, color:"#475569", fontWeight:600, marginBottom:8 }}>After generation, auto-publish to</div>
+            <div style={{ display:"flex", flexWrap:"wrap", gap:14 }}>
+              {["jira","telegram","email","slack"].map(ch=>(
+                <label key={ch} style={{ display:"flex", alignItems:"center", gap:6, cursor:"pointer", fontSize:12, color:"#94A3B8" }}>
+                  <input type="checkbox" checked={!!autoPublishChannels[ch]} onChange={e=>setAutoPublishChannels(p=>({ ...p, [ch]: e.target.checked }))} />
+                  {ch==="jira"&&"JIRA"}
+                  {ch==="telegram"&&"Telegram"}
+                  {ch==="email"&&"Email"}
+                  {ch==="slack"&&"Slack"}
+                </label>
+              ))}
+            </div>
+            <div style={{ fontSize:10, color:"#64748b", marginTop:4 }}>Set default destinations in Connectors (top bar).</div>
           </div>
 
           {feedbackMemory.length > 0 && (
@@ -1069,22 +1143,25 @@ export default function PRDAgent() {
 
         {/* ── STEP 5: DONE ── */}
         {phase==="done" && (
-          <div style={{ background:"#052E16", border:"1px solid #16A34A44", borderRadius:14, padding:20, animation:"fadeUp .4s ease" }}>
-            <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", flexWrap:"wrap", gap:12 }}>
-              <div style={{ display:"flex", alignItems:"center", gap:12 }}>
-                <span style={{ fontSize:28 }}>🎉</span>
-                <div>
-                  <div style={{ fontSize:14, fontWeight:700, color:"#4ADE80" }}>PRD Finalised & Saved!</div>
-                  <div style={{ fontSize:12, color:"#16A34A" }}>Copy to clipboard, apply more feedback, or start a new PRD.</div>
+          <>
+            <div style={{ background:"#052E16", border:"1px solid #16A34A44", borderRadius:14, padding:20, animation:"fadeUp .4s ease" }}>
+              <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", flexWrap:"wrap", gap:12 }}>
+                <div style={{ display:"flex", alignItems:"center", gap:12 }}>
+                  <span style={{ fontSize:28 }}>🎉</span>
+                  <div>
+                    <div style={{ fontSize:14, fontWeight:700, color:"#4ADE80" }}>PRD Finalised & Saved!</div>
+                    <div style={{ fontSize:12, color:"#16A34A" }}>Copy to clipboard, apply more feedback, or start a new PRD.</div>
+                  </div>
+                </div>
+                <div style={{ display:"flex", gap:10, flexWrap:"wrap" }}>
+                  <DownloadBar/>
+                  <button onClick={()=>setShowHistory(true)} className="hov" style={{ background:"#0D1626", border:"1px solid #1E3A5F", borderRadius:10, padding:"10px 16px", color:"#93C5FD", fontSize:13, fontWeight:600, cursor:"pointer" }}>📋 History</button>
+                  <button onClick={reset} className="hov" style={{ background:"#111827", border:"1px solid #1E293B", borderRadius:10, padding:"10px 16px", color:"#64748B", fontSize:13, fontWeight:600, cursor:"pointer" }}>+ New PRD</button>
                 </div>
               </div>
-              <div style={{ display:"flex", gap:10, flexWrap:"wrap" }}>
-                <DownloadBar/>
-                <button onClick={()=>setShowHistory(true)} className="hov" style={{ background:"#0D1626", border:"1px solid #1E3A5F", borderRadius:10, padding:"10px 16px", color:"#93C5FD", fontSize:13, fontWeight:600, cursor:"pointer" }}>📋 History</button>
-                <button onClick={reset} className="hov" style={{ background:"#111827", border:"1px solid #1E293B", borderRadius:10, padding:"10px 16px", color:"#64748B", fontSize:13, fontWeight:600, cursor:"pointer" }}>+ New PRD</button>
-              </div>
             </div>
-          </div>
+            {prd && <ShareAndScore docType="prd" title={prd.title} content={buildMd(prd)} autoPublish={Object.keys(autoPublishChannels).filter(k=>autoPublishChannels[k])} />}
+          </>
         )}
 
         <div ref={bottomRef}/>

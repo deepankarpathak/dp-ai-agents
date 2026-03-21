@@ -118,14 +118,10 @@ Backend is set up for cloud:
    build/
    ```
 
-3. **Use the new backend locally**  
-   - Run backend from `backend/` with `npm start` (see section 3).  
-   - Keep using the root `package.json` for the frontend; do not run the old root `server.js`.
+3. **Run the backend from `backend/`**  
+   Use `cd backend && npm start`. Frontend uses root `package.json` and proxies to the backend.
 
-4. **Optional: remove old root server files**  
-   After confirming the backend in `backend/` works, you can delete the root `server.js` and `pdfParser.js` to avoid confusion.
-
-5. **Commit and push**
+4. **Commit and push**
 
    ```bash
    git init
@@ -137,7 +133,17 @@ Backend is set up for cloud:
 
 ---
 
-## 8. Summary
+## 8. Running on your machine (“offline” / local)
+
+**“Offline” here means: the code runs on your MacBook (or any machine); you still use Anthropic or any other LLM over the internet via API key.** The app does not require deployment to a server.
+
+- **Backend**: Run from `backend/` with `npm start`. It reads `.env` from the repo root or `backend/`. Your LLM key (Anthropic, OpenAI, or gateway) in `.env` is used to call the LLM over the network.
+- **Frontend**: Run from root with `npm start` (proxies to backend). `REACT_APP_API_URL` is empty so requests go to the same origin (localhost).
+- **No conflict with GitHub**: The same repo works when code is on your machine and when pushed to GitHub; only where the app runs (local vs cloud) and `.env` (local file vs platform env) differ.
+
+---
+
+## 9. Summary
 
 | Item              | Location / Action                                      |
 |-------------------|--------------------------------------------------------|
@@ -146,3 +152,4 @@ Backend is set up for cloud:
 | Env template      | `.env.example` (copy to `.env`, do not commit `.env`) |
 | Server for cloud  | `backend/server.js` (PORT, NODE_ENV, serves `build/`)  |
 | Frontend for prod | `npm run build`; set `REACT_APP_API_URL` if different host |
+| Run on your machine | Code on MacBook; backend + frontend local; LLM via Anthropic/other key (same repo as GitHub) |
