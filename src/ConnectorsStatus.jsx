@@ -16,6 +16,17 @@ function savePublishDefaults(d) {
   } catch {}
 }
 
+/** Sync default JIRA issue key (Connectors → Publish) from agent connector field or fetched key. */
+export function syncPublishDefaultJiraKey(keyOrText) {
+  const raw = (keyOrText || "").trim();
+  if (!raw) return;
+  const m = raw.match(/\b([A-Z][A-Z0-9]*-\d+)\b/i);
+  const key = m ? m[1].toUpperCase() : "";
+  if (!/^[A-Z][A-Z0-9]*-\d+$/.test(key)) return;
+  const cur = loadPublishDefaults();
+  savePublishDefaults({ ...cur, jiraKey: key });
+}
+
 export { loadPublishDefaults, savePublishDefaults, PUBLISH_DEFAULTS_KEY };
 
 const CONNECTOR_LIST = [
@@ -76,7 +87,7 @@ export default function ConnectorsStatus() {
         ) : (
           <span style={{ fontSize: 10, color: "#64748b" }}>0 connected</span>
         )}
-        <span style={{ fontSize: 10, color: "#64748b", marginLeft: 2 }}>· Click to enable others</span>
+        <span style={{ fontSize: 10, color: "#64748b", marginLeft: 2 }}>· {connectedCount}/{totalCount} · Click to enable others</span>
       </div>
 
       {open && (

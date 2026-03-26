@@ -1,6 +1,7 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import { API_BASE } from "./config.js";
 import { loadPublishDefaults } from "./ConnectorsStatus.jsx";
+import { buildShareSubjectLine } from "./shareSubject.js";
 
 const panelStyle = {
   background: "#0D1626",
@@ -26,28 +27,39 @@ const btnStyle = (primary = false) => ({
 
 /**
  * Share (JIRA, Telegram, Email, Slack) + Score (GPT 5.4) for PRD / UAT / BRD success screens.
- * Supports optional "Publish" with pre-configured defaults (set in Connectors).
- * @param {Object} props
  * @param {'prd'|'uat'|'brd'} props.docType
- * @param {string} props.title - Document title
- * @param {string} props.content - Full text/markdown to share and score
- * @param {string[]} [props.autoPublish] - e.g. ['jira','telegram'] to auto-run publish to these when content is ready
+ * @param {string} props.title - Document / J.display title
+ * @param {string} props.content - Full markdown
+ * @param {string} [props.jiraKey] - e.g. TSP-1889 for email subject pattern
+ * @param {string[]} [props.autoPublish]
  */
-export default function ShareAndScore({ docType, title, content, autoPublish = [] }) {
+export default function ShareAndScore({ docType, title, content, jiraKey = "", autoPublish = [] }) {
   const [shareStatus, setShareStatus] = useState({ type: "", ok: false, msg: "" });
   const [score, setScore] = useState(null);
   const [scoreLoading, setScoreLoading] = useState(false);
   const [scoreError, setScoreError] = useState("");
   const [publishSelected, setPublishSelected] = useState({ jira: true, telegram: true, email: true, slack: true });
-  const [publishDefaults, setPublishDefaults] = useState(() => loadPublishDefaults());
   const [publishRunning, setPublishRunning] = useState(false);
   const [publishDone, setPublishDone] = useState(false);
 
-  useEffect(() => { setPublishDefaults(loadPublishDefaults()); }, []);
+  const shareSubject = useMemo(
+    () => buildShareSubjectLine(docType, jiraKey, title),
+    [docType, jiraKey, title]
+  );
+
   const ranAutoPublish = useRef(false);
+  const contentHeadRef = useRef("");
+
+  useEffect(() => {
+    const head = (content || "").slice(0, 160);
+    if (head !== contentHeadRef.current) {
+      contentHeadRef.current = head;
+      ranAutoPublish.current = false;
+    }
+  }, [content]);
+
   useEffect(() => {
     if (!content || autoPublish.length === 0 || ranAutoPublish.current) return;
-    ranAutoPublish.current = true;
     const defs = loadPublishDefaults();
     const toRun = [];
     if (autoPublish.includes("jira") && defs.jiraKey) toRun.push("jira");
@@ -55,34 +67,64 @@ export default function ShareAndScore({ docType, title, content, autoPublish = [
     if (autoPublish.includes("email") && defs.emailTo) toRun.push("email");
     if (autoPublish.includes("slack")) toRun.push("slack");
     if (toRun.length === 0) return;
+    ranAutoPublish.current = true;
     setPublishRunning(true);
     (async () => {
-      const subject = `${docType.toUpperCase()}: ${title || "Output"}`;
       for (const t of toRun) {
         try {
           if (t === "jira") await apiJson("/api/share/jira", { issueKey: defs.jiraKey, text: content, title });
           else if (t === "telegram") await apiJson("/api/share/telegram", { chatId: defs.telegramChatId, text: content, title });
-          else if (t === "email") await apiJson("/api/share/email", { to: defs.emailTo, subject, text: content, title });
+          else if (t === "email") await apiJson("/api/share/email", { to: defs.emailTo, subject: shareSubject, text: content, title });
           else if (t === "slack") await apiJson("/api/share/slack", { text: content, title });
         } catch (_) {}
       }
       setPublishRunning(false);
       setPublishDone(true);
     })();
-  }, [content, autoPublish, docType, title]);
+  }, [content, autoPublish, docType, title, shareSubject]);
 
   async function apiJson(path, body) {
-    const r = await fetch(`${API_BASE}${path}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
+    const primary = `${API_BASE}${path}`;
+    const urls = [primary];
+    if (primary.startsWith("http://127.0.0.1:")) {
+      const alt = primary.replace("http://127.0.0.1:", "http://localhost:");
+      if (alt !== primary) urls.push(alt);
+    }
+    let r;
+    let lastNetErr;
+    for (const url of urls) {
+      try {
+        r = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        lastNetErr = undefined;
+        break;
+      } catch (e) {
+        lastNetErr = e;
+      }
+    }
+    if (!r) {
+      throw new Error(
+        `Cannot reach API (${primary}). Start the backend: open a terminal and run \`npm run start:backend\` from the repo root, or run \`npm run dev\` to start frontend + backend together. (${lastNetErr?.message || "Failed to fetch"})`
+      );
+    }
     const text = await r.text();
     let d;
     try {
       d = text ? JSON.parse(text) : {};
     } catch {
-      throw new Error(r.ok ? "Invalid response from server" : `Backend error: ${r.status}. Is the server running on the correct port?`);
+      if (r.status === 404) {
+        throw new Error(
+          "Backend returned 404 — Share/Score routes are served by backend/server.js (not the root server.js). Run: npm run start:backend (port 5000). If the backend uses another port, set REACT_APP_API_URL in .env and restart npm start."
+        );
+      }
+      throw new Error(
+        r.ok
+          ? "Invalid JSON from server"
+          : `Backend error: ${r.status}. ${text.slice(0, 120).replace(/\s+/g, " ")}`
+      );
     }
     return { ok: r.ok, data: d };
   }
@@ -92,7 +134,7 @@ export default function ShareAndScore({ docType, title, content, autoPublish = [
     if (!defs.jiraKey?.trim()) { setShareStatus({ type: "jira", ok: false, msg: "Set default JIRA issue key in Connectors (top bar)" }); return; }
     setShareStatus({ type: "", msg: "" });
     try {
-      const { ok, data: d } = await apiJson("/api/share/jira", { issueKey: defs.jiraKey.trim(), text: content, title });
+      const { data: d } = await apiJson("/api/share/jira", { issueKey: defs.jiraKey.trim(), text: content, title });
       if (d.success) setShareStatus({ type: "jira", ok: true, msg: "Posted to JIRA" });
       else setShareStatus({ type: "jira", ok: false, msg: d.error || "Failed" });
     } catch (e) { setShareStatus({ type: "jira", ok: false, msg: e.message }); }
@@ -103,7 +145,7 @@ export default function ShareAndScore({ docType, title, content, autoPublish = [
     if (!defs.telegramChatId?.trim()) { setShareStatus({ type: "tg", ok: false, msg: "Set default Telegram chat ID in Connectors (top bar)" }); return; }
     setShareStatus({ type: "", msg: "" });
     try {
-      const { ok, data: d } = await apiJson("/api/share/telegram", { chatId: defs.telegramChatId.trim(), text: content, title });
+      const { data: d } = await apiJson("/api/share/telegram", { chatId: defs.telegramChatId.trim(), text: content, title });
       if (d.success) setShareStatus({ type: "tg", ok: true, msg: "Sent to Telegram" });
       else setShareStatus({ type: "tg", ok: false, msg: d.error || "Failed" });
     } catch (e) { setShareStatus({ type: "tg", ok: false, msg: e.message }); }
@@ -114,8 +156,7 @@ export default function ShareAndScore({ docType, title, content, autoPublish = [
     if (!defs.emailTo?.trim()) { setShareStatus({ type: "email", ok: false, msg: "Set default email in Connectors (top bar)" }); return; }
     setShareStatus({ type: "", msg: "" });
     try {
-      const subject = `${docType.toUpperCase()}: ${title || "Output"}`;
-      const { data: d } = await apiJson("/api/share/email", { to: defs.emailTo.trim(), subject, text: content, title });
+      const { data: d } = await apiJson("/api/share/email", { to: defs.emailTo.trim(), subject: shareSubject, text: content, title });
       if (d.success) setShareStatus({ type: "email", ok: true, msg: "Email sent" });
       else setShareStatus({ type: "email", ok: false, msg: d.error || "Failed" });
     } catch (e) { setShareStatus({ type: "email", ok: false, msg: e.message }); }
@@ -133,7 +174,6 @@ export default function ShareAndScore({ docType, title, content, autoPublish = [
 
   const handlePublish = async () => {
     const defs = loadPublishDefaults();
-    const subject = `${docType.toUpperCase()}: ${title || "Output"}`;
     setShareStatus({ type: "", msg: "" });
     const results = [];
     if (publishSelected.jira && defs.jiraKey) {
@@ -150,7 +190,7 @@ export default function ShareAndScore({ docType, title, content, autoPublish = [
     } else if (publishSelected.telegram) results.push("Telegram: Set default in Connectors");
     if (publishSelected.email && defs.emailTo) {
       try {
-        const { data: d } = await apiJson("/api/share/email", { to: defs.emailTo.trim(), subject, text: content, title });
+        const { data: d } = await apiJson("/api/share/email", { to: defs.emailTo.trim(), subject: shareSubject, text: content, title });
         results.push(d.success ? "Email ✓" : "Email: " + (d.error || "Failed"));
       } catch (e) { results.push("Email: " + e.message); }
     } else if (publishSelected.email) results.push("Email: Set default in Connectors");
@@ -170,6 +210,7 @@ export default function ShareAndScore({ docType, title, content, autoPublish = [
   return (
     <div style={panelStyle}>
       <div style={{ fontSize: 12, fontWeight: 700, color: "#94A3B8", marginBottom: 10 }}>Share &amp; score</div>
+      <div style={{ fontSize: 10, color: "#64748b", marginBottom: 10, fontFamily: "monospace", wordBreak: "break-all" }}>Subject: {shareSubject}</div>
 
       {/* Publish (pre-configured defaults) */}
       <div style={{ marginBottom: 14 }}>
@@ -191,7 +232,7 @@ export default function ShareAndScore({ docType, title, content, autoPublish = [
         {autoPublish.length > 0 && publishRunning && <div style={{ fontSize: 11, color: "#94a3b8", marginTop: 6 }}>Auto-publishing to {autoPublish.join(", ")}…</div>}
       </div>
 
-      {/* Share (uses defaults from Connectors — no duplicate inputs) */}
+      {/* Share */}
       <div style={{ fontSize: 11, color: "#64748b", marginBottom: 6 }}>Send to one destination (uses defaults from Connectors):</div>
       <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8, marginBottom: 12 }}>
         <button type="button" onClick={handleShareJira} style={btnStyle()}>Post to JIRA</button>

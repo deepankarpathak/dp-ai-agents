@@ -1,6 +1,9 @@
 import { useState, useRef, useEffect } from "react";
 import { API_BASE, sendCompletionNotify } from "./config.js";
 import ShareAndScore from "./ShareAndScore.jsx";
+import { syncPublishDefaultJiraKey } from "./ConnectorsStatus.jsx";
+import { exportAgentOutput } from "./agentExport.js";
+import { buildShareSubjectLine } from "./shareSubject.js";
 
 // ── Domains (Feedback 2) ─────────────────────────────────────────────────────
 const DOMAINS = [
@@ -248,6 +251,7 @@ export default function BRDAgent() {
 
   // Auto-publish after generation (session option)
   const [autoPublishChannels, setAutoPublishChannels] = useState({ jira: false, telegram: false, email: false, slack: false });
+  const [allowAutoPublish, setAllowAutoPublish] = useState(false);
 
   const fileRef = useRef();
   const feedbackFileRef = useRef();
@@ -268,6 +272,7 @@ export default function BRDAgent() {
       if (data.summary) setSubject(data.summary);
       if (data.description) setDescription(data.description);
       if (data.acceptanceCriteria) setAc(data.acceptanceCriteria);
+      syncPublishDefaultJiraKey(issueKey);
       setStatusMsg("");
     } catch (e) { setError("JIRA: " + e.message); }
     setLoading(false);
@@ -328,7 +333,18 @@ export default function BRDAgent() {
       setHistory((prev) => [entry, ...prev].slice(0, 50));
       setPhase("output");
       setStatusMsg("");
-      await sendCompletionNotify("BRD Agent", jiraId || subject || "BRD");
+      void exportAgentOutput({
+        agent: "BRD",
+        jiraId: parseJiraIssueKey(jiraId) || jiraId || "NOJIRA",
+        subject: subject || "BRD",
+        content: raw,
+      });
+      setAllowAutoPublish(true);
+      await sendCompletionNotify({
+        agentName: "BRD Agent",
+        identifier: jiraId || subject || "BRD",
+        notifySubject: buildShareSubjectLine("brd", parseJiraIssueKey(jiraId), subject || "BRD"),
+      });
     } catch (e) { setError("Error: " + e.message); setPhase("input"); }
     setLoading(false);
   };
@@ -366,7 +382,12 @@ export default function BRDAgent() {
       });
       setFeedbackText("");
       setStatusMsg("");
-      await sendCompletionNotify("BRD Agent", jiraId || subject || "BRD");
+      setAllowAutoPublish(true);
+      await sendCompletionNotify({
+        agentName: "BRD Agent",
+        identifier: jiraId || subject || "BRD",
+        notifySubject: buildShareSubjectLine("brd", parseJiraIssueKey(jiraId), (subject || "BRD") + "-revised"),
+      });
     } catch (e) { setError("Error: " + e.message); }
     setLoading(false);
   };
@@ -387,9 +408,11 @@ export default function BRDAgent() {
   // ── Reset ──
   const reset = () => {
     setPhase("input"); setJiraId(""); setJiraData(null); setSubject(""); setDomain("switch"); setDescription(""); setAc(""); setAttachments([]); setQuestions([]); setAnswers({}); setBrdRaw(""); setError(""); setFeedbackText(""); setAutoPublishChannels({ jira: false, telegram: false, email: false, slack: false });
+    setAllowAutoPublish(false);
   };
 
   const loadHistoryItem = (item) => {
+    setAllowAutoPublish(false);
     setBrdRaw(item.brd);
     setSubject(item.subject || "");
     setJiraId(item.jiraId || "");
@@ -432,7 +455,7 @@ export default function BRDAgent() {
                 <span style={{ fontSize: 14, fontWeight: 600 }}>JIRA Connector</span>
               </div>
               <div style={{ display: "flex", gap: 8 }}>
-                <input value={jiraId} onChange={(e) => setJiraId(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleFetchJira()} placeholder="e.g. TSP-1889 or paste JIRA browse URL" style={{ flex: 1, background: C.bg3, border: `1px solid ${C.border2}`, color: C.text, fontSize: 13, padding: "8px 11px", borderRadius: 10, fontFamily: "inherit" }} />
+                <input value={jiraId} onChange={(e) => setJiraId(e.target.value)} onBlur={() => { const k = parseJiraIssueKey(jiraId); if (k) syncPublishDefaultJiraKey(k); }} onKeyDown={(e) => e.key === "Enter" && handleFetchJira()} placeholder="e.g. TSP-1889 or paste JIRA browse URL" style={{ flex: 1, background: C.bg3, border: `1px solid ${C.border2}`, color: C.text, fontSize: 13, padding: "8px 11px", borderRadius: 10, fontFamily: "inherit" }} />
                 <button type="button" onClick={handleFetchJira} disabled={loading} style={{ padding: "8px 16px", borderRadius: 10, fontSize: 12, fontWeight: 600, cursor: "pointer", border: "none", background: "rgba(79,163,227,0.1)", color: "#4fa3e3", fontFamily: "inherit" }}>↓ Fetch</button>
               </div>
               {jiraData && (
@@ -580,7 +603,15 @@ export default function BRDAgent() {
               {renderBRDMarkdown(brdRaw)}
             </div>
 
-            {brdRaw && <ShareAndScore docType="brd" title={subject} content={brdRaw} autoPublish={Object.keys(autoPublishChannels).filter((k) => autoPublishChannels[k])} />}
+            {brdRaw && (
+              <ShareAndScore
+                docType="brd"
+                title={subject || "BRD"}
+                jiraKey={parseJiraIssueKey(jiraId) || ""}
+                content={brdRaw}
+                autoPublish={allowAutoPublish ? Object.keys(autoPublishChannels).filter((k) => autoPublishChannels[k]) : []}
+              />
+            )}
 
             {/* Feedback section (Feedback 4) */}
             <div style={{ background: C.bg2, border: `1px solid ${C.border}`, borderRadius: 14, padding: 20 }}>

@@ -1,5 +1,13 @@
 # Share & Score
 
+## Prerequisites (avoid “Backend error: 404”)
+
+1. **Run the backend** from the repo root: `npm run start:backend` (starts `backend/server.js` on port **5000** by default). Share, Score, and JIRA fetch APIs live only in that server.
+2. **Easiest:** run frontend + backend together: `npm install` once, then `npm run dev`.
+3. If the backend uses another port, set **`REACT_APP_API_URL=http://127.0.0.1:YOUR_PORT`** in `.env` and restart `npm start`.
+
+---
+
 On the **success screen** of each agent (PRD, UAT, BRD) you get:
 
 1. **Publish** – One-click send to JIRA, Slack, Telegram, and/or Email using **pre-configured defaults** (no typing).

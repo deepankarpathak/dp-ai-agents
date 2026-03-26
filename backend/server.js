@@ -2,6 +2,7 @@ import express from "express";
 import cors from "cors";
 import fetch from "node-fetch";
 import dotenv from "dotenv";
+import https from "https";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -10,12 +11,18 @@ import mammoth from "mammoth";
 import { Document, Packer, Paragraph, HeadingLevel } from "docx";
 import { extractTextFromPDF } from "./pdfParser.js";
 import { retrieve as ragRetrieve } from "./rag/retrieve.js";
+import {
+  markdownToEmailHtml,
+  markdownToJiraAdf,
+  markdownToSlackPayload,
+  markdownToTelegramChunks,
+} from "./shareMarkdown.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // Load .env from backend/ or repo root (for cloud, env vars are often set by platform)
-dotenv.config({ path: path.join(__dirname, ".env") });
-dotenv.config({ path: path.join(__dirname, "..", ".env") });
+dotenv.config({ path: path.join(__dirname, ".env"), quiet: true });
+dotenv.config({ path: path.join(__dirname, "..", ".env"), quiet: true });
 
 const PORT = Number(process.env.PORT) || 5000;
 const NODE_ENV = process.env.NODE_ENV || "development";
@@ -23,6 +30,7 @@ const NODE_ENV = process.env.NODE_ENV || "development";
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
 
 const PRD_OUTPUT_DIR = path.join(__dirname, "prd-output");
+const AGENT_EXPORT_DIR = path.join(__dirname, "agent-exports");
 const SECTION_TITLES = {
   problem: "Problem Statement",
   objective: "Objective",
@@ -331,17 +339,50 @@ app.get("/api/jira-issue/:id", async (req, res) => {
 
 // ── Share: JIRA comment, Telegram, Email ─────────────────────────────────────
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
+/** Corporate SSL inspection: set TELEGRAM_INSECURE_TLS=true in .env (dev only). */
+const telegramHttpsAgent =
+  process.env.TELEGRAM_INSECURE_TLS === "true"
+    ? new https.Agent({ rejectUnauthorized: false })
+    : undefined;
 
-function jiraCommentBody(plainText) {
-  const maxLen = 32000;
-  const text = String(plainText).slice(0, maxLen);
-  let content = text.split(/\n/).filter(Boolean).map((line) => ({
-    type: "paragraph",
-    content: [{ type: "text", text: line }],
-  }));
-  if (!content.length) content = [{ type: "paragraph", content: [{ type: "text", text: "(empty)" }] }];
-  return { body: { type: "doc", version: 1, content } };
+async function telegramApiSendMessage(chatId, textBody, parseMode) {
+  const r = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: chatId,
+      text: textBody,
+      parse_mode: parseMode,
+      disable_web_page_preview: true,
+    }),
+    ...(telegramHttpsAgent ? { agent: telegramHttpsAgent } : {}),
+  });
+  const data = await r.json().catch(() => ({}));
+  return { ok: r.ok, data };
 }
+
+app.post("/api/save-agent-output", (req, res) => {
+  try {
+    const { agent, jiraId, subject, content } = req.body || {};
+    const text = String(content || "");
+    if (!text.trim()) return res.status(400).json({ ok: false, error: "empty content" });
+    if (!fs.existsSync(AGENT_EXPORT_DIR)) fs.mkdirSync(AGENT_EXPORT_DIR, { recursive: true });
+    const ts = new Date().toISOString().replace(/[:.]/g, "-");
+    const safe = (s) =>
+      String(s || "")
+        .replace(/[/\\?%*:|"<>#\s]+/g, "_")
+        .replace(/_+/g, "_")
+        .slice(0, 100);
+    const jid = safe((jiraId || "NOJIRA").toUpperCase().slice(0, 40));
+    const ag = safe((agent || "DOC").toUpperCase());
+    const subj = safe(subject || "output");
+    const filename = `${jid}-${ag}-${subj}-${ts}.md`;
+    fs.writeFileSync(path.join(AGENT_EXPORT_DIR, filename), text, "utf8");
+    res.json({ ok: true, filename });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
 
 app.post("/api/share/jira", async (req, res) => {
   try {
@@ -349,14 +390,14 @@ app.post("/api/share/jira", async (req, res) => {
     if (!issueKey || !text) return res.status(400).json({ success: false, error: "Missing issueKey or text" });
     if (!JIRA_URL || !JIRA_EMAIL || !JIRA_TOKEN) return res.status(400).json({ success: false, error: "JIRA not configured in .env" });
     const key = String(issueKey).toUpperCase().replace(/\s/g, "");
-    const comment = title ? `*${title}*\n\n${text}` : text;
+    const md = title ? `## ${title}\n\n${text}` : String(text);
     const r = await fetch(`${JIRA_URL}/rest/api/3/issue/${key}/comment`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: "Basic " + Buffer.from(`${JIRA_EMAIL}:${JIRA_TOKEN}`).toString("base64"),
       },
-      body: JSON.stringify(jiraCommentBody(comment)),
+      body: JSON.stringify(markdownToJiraAdf(md)),
     });
     const data = await r.json().catch(() => ({}));
     if (!r.ok) return res.status(r.status).json({ success: false, error: data.errorMessages?.[0] || r.statusText });
@@ -366,20 +407,30 @@ app.post("/api/share/jira", async (req, res) => {
   }
 });
 
+function escapeTelegramHtml(s) {
+  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
 app.post("/api/share/telegram", async (req, res) => {
   try {
     const { chatId, text, title } = req.body || {};
     if (!chatId || !text) return res.status(400).json({ success: false, error: "Missing chatId or text" });
     if (!TELEGRAM_BOT_TOKEN) return res.status(400).json({ success: false, error: "TELEGRAM_BOT_TOKEN not set in .env" });
-    const message = title ? `*${title}*\n\n${text}` : text;
-    const r = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chat_id: chatId, text: message.slice(0, 4096), parse_mode: "Markdown" }),
-    });
-    const data = await r.json().catch(() => ({}));
-    if (!data.ok) return res.status(400).json({ success: false, error: data.description || "Telegram API error" });
-    res.json({ success: true, message_id: data.result?.message_id });
+    let chunks = markdownToTelegramChunks(String(text));
+    if (title) {
+      const prefix = `<b>${escapeTelegramHtml(title)}</b>\n\n`;
+      if (chunks.length) chunks[0] = prefix + chunks[0];
+      else chunks = [prefix];
+    }
+    let lastId;
+    for (const chunk of chunks) {
+      const { ok, data } = await telegramApiSendMessage(chatId, chunk.slice(0, 4096), "HTML");
+      if (!ok || !data.ok) {
+        return res.status(400).json({ success: false, error: data.description || data.message || "Telegram API error" });
+      }
+      lastId = data.result?.message_id;
+    }
+    res.json({ success: true, message_id: lastId });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -393,7 +444,9 @@ app.post("/api/share/slack", async (req, res) => {
     if (!text) return res.status(400).json({ success: false, error: "Missing text" });
     const webhookUrl = SLACK_WEBHOOK_URL || process.env.SLACK_WEBHOOK_URL;
     if (!webhookUrl) return res.status(400).json({ success: false, error: "SLACK_WEBHOOK_URL not set in .env" });
-    const payload = title ? { text: `*${title}*\n\n${text}` } : { text: String(text).slice(0, 40000) };
+    const formatted = markdownToSlackPayload(title || "", String(text));
+    const preview = String(title ? `${title}\n\n${text}` : text).slice(0, 500);
+    const payload = { ...formatted, text: preview };
     if (channel) payload.channel = channel;
     const r = await fetch(webhookUrl, {
       method: "POST",
@@ -422,12 +475,15 @@ app.post("/api/share/email", async (req, res) => {
       auth: process.env.EMAIL_USER ? { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS || process.env.EMAIL_PASSWORD } : undefined,
     };
     const transporter = nodemailer.createTransport(transportOpts);
-    const body = title ? `${title}\n\n${text}` : text;
+    const md = title ? `## ${title}\n\n${text}` : String(text);
+    const bodyText = title ? `${title}\n\n${text}` : text;
+    const bodyHtml = markdownToEmailHtml(md);
     await transporter.sendMail({
       from: process.env.EMAIL_FROM || process.env.EMAIL_USER || "noreply@local",
       to,
       subject: subject || "AI Agents Output",
-      text: body,
+      text: bodyText,
+      html: bodyHtml,
     });
     res.json({ success: true });
   } catch (err) {
@@ -477,9 +533,12 @@ app.post("/api/score", async (req, res) => {
 // ── Completion notification (Email + Slack/WhatsApp) ─────────────────────────
 app.post("/api/notify/complete", async (req, res) => {
   try {
-    const { agentName, identifier } = req.body || {};
+    const { agentName, identifier, notifySubject } = req.body || {};
     if (!agentName || !identifier) return res.status(400).json({ success: false, error: "Missing agentName or identifier" });
-    const subject = `${agentName} — ${identifier} is done`;
+    const subject =
+      notifySubject && String(notifySubject).trim()
+        ? String(notifySubject).trim()
+        : `${agentName} — ${identifier} is done`;
     const body = `${subject}\n\nGenerated at ${new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })}`;
     const results = [];
 
@@ -538,12 +597,8 @@ app.post("/api/notify/complete", async (req, res) => {
       const tgChatId = process.env.TELEGRAM_NOTIFY_CHAT_ID || process.env.TELEGRAM_CHAT_ID || "";
       if (tgChatId) {
         try {
-          const r = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ chat_id: tgChatId, text: subject }),
-          });
-          results.push(r.ok ? "telegram:ok" : "telegram:failed");
+          const { ok, data } = await telegramApiSendMessage(tgChatId, `<b>${escapeTelegramHtml(subject)}</b>`, "HTML");
+          results.push(ok && data.ok ? "telegram:ok" : "telegram:failed");
         } catch (e) { results.push("telegram:" + e.message); }
       }
     }

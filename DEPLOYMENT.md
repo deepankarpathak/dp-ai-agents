@@ -52,6 +52,10 @@ npm start
 
 Or from repo root: `npm run start:backend` in one terminal and `npm start` in another.
 
+Or run both: `npm run dev` (install deps in **root** and in **`backend/`** first).
+
+**Root `server.js`:** A **launcher only** — it runs `backend/server.js` with `cwd=backend/` so Express and `iconv-lite` load from `backend/node_modules`. Avoid running a full Express app from the root `node_modules`.
+
 ---
 
 ## 4. Environment variables
@@ -138,7 +142,15 @@ Backend is set up for cloud:
 **“Offline” here means: the code runs on your MacBook (or any machine); you still use Anthropic or any other LLM over the internet via API key.** The app does not require deployment to a server.
 
 - **Backend**: Run from `backend/` with `npm start`. It reads `.env` from the repo root or `backend/`. Your LLM key (Anthropic, OpenAI, or gateway) in `.env` is used to call the LLM over the network.
-- **Frontend**: Run from root with `npm start` (proxies to backend). `REACT_APP_API_URL` is empty so requests go to the same origin (localhost).
+- **Frontend**: Run from root with `npm start`. In development, the app calls `http://127.0.0.1:5000` by default (see `src/config.js`); ensure the backend is running there.
+
+### If PRD fails with `Cannot find module '../encodings'` (iconv-lite)
+
+That usually means Express was running from the **repo root** with a broken root `node_modules` tree. Fix:
+
+1. `cd backend && npm install` (installs `iconv-lite` explicitly).
+2. Start the API with **`npm run start:backend`** or **`node server.js` from repo root** (launcher → backend only).
+3. Optional: remove stale server deps from root — `rm -rf node_modules && npm install` in the repo root.
 - **No conflict with GitHub**: The same repo works when code is on your machine and when pushed to GitHub; only where the app runs (local vs cloud) and `.env` (local file vs platform env) differ.
 
 ---

@@ -1,6 +1,9 @@
 import { useState, useRef, useEffect } from "react";
 import { API_BASE, sendCompletionNotify } from "./config.js";
 import ShareAndScore from "./ShareAndScore.jsx";
+import { syncPublishDefaultJiraKey } from "./ConnectorsStatus.jsx";
+import { exportAgentOutput } from "./agentExport.js";
+import { buildShareSubjectLine } from "./shareSubject.js";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 const MODELS = [
@@ -352,6 +355,7 @@ export default function PRDAgent() {
   const [jiraFetchLoading, setJiraFetchLoading] = useState(false);
   const [jiraFetchError, setJiraFetchError]     = useState("");
   const [autoPublishChannels, setAutoPublishChannels] = useState({ jira: false, telegram: false, email: false, slack: false });
+  const [allowAutoPublish, setAllowAutoPublish] = useState(false);
 
   const fileRef   = useRef();
   const bottomRef = useRef();
@@ -392,6 +396,7 @@ export default function PRDAgent() {
       if (!r.ok) throw new Error(d.error || `JIRA error ${r.status}`);
       const parts = [d.summary ? `JIRA: ${d.id} — ${d.summary}` : `JIRA: ${d.id}`, d.description, d.acceptanceCriteria ? `Acceptance criteria:\n${d.acceptanceCriteria}` : ""].filter(Boolean);
       setInput(parts.join("\n\n"));
+      syncPublishDefaultJiraKey(d.id || key);
     } catch (e) {
       setJiraFetchError(e.message || "JIRA fetch failed");
     }
@@ -440,7 +445,7 @@ export default function PRDAgent() {
         batch.forEach(k=>{parsed[k]="(Generation failed — please retry)";});
       }
       combined = { ...combined, ...parsed };
-      setPrd(prev=>({ ...(prev||{}), ...combined }));
+      setPrd((prev) => ({ ...(prev || {}), ...parsed }));
     }
     setProgress({ done:BATCHES.length, total:BATCHES.length });
     return combined;
@@ -509,11 +514,19 @@ export default function PRDAgent() {
     setPreFeedbackPhase("ready");
   };
 
+  const buildMd = (p) =>
+    `# ${p.title||"UPI Switch PRD"}\n**Version:** ${p.version||"v1.0"}  |  **Date:** ${new Date().toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"numeric"})}\n\n---\n\n` +
+    PRD_SECTIONS.map(s=>`## ${s.icon} ${s.title}\n\n${p[s.key]||"_Not generated_"}`).join("\n\n---\n\n");
+
+  const buildPlainText = (p) =>
+    `${p.title||"UPI Switch PRD"}\nVersion: ${p.version||"v1.0"}  |  Date: ${new Date().toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"numeric"})}\n\n` +
+    PRD_SECTIONS.map(s=>`${"=".repeat(60)}\n${s.icon}  ${s.title}\n${"=".repeat(60)}\n\n${p[s.key]||"(Not generated)"}`).join("\n\n");
+
   // ── Main generate ──────────────────────────────────────────────────────────
   const handleGenerate = async () => {
     if (!input.trim() && files.length===0) { setError("Please enter a requirement or upload a document."); return; }
     if (preFeedbackPhase !== "ready") { handleStartPreFeedback(); return; }
-    setError(""); setLoading(true); setPhase("generating"); setPrd(null);
+    setError(""); setLoading(true); setPhase("generating"); setPrd(null); setAllowAutoPublish(false);
     try {
       let req = input.trim();
       for (const f of files) req += "\n\n" + await readFile(f);
@@ -530,10 +543,25 @@ export default function PRDAgent() {
       const fullPrd  = { ...meta, ...sections };
       setPrd(fullPrd);
       await persistToHistory(fullPrd, req);
+      {
+        const jid = parseJiraIssueKey(jiraIssueKey) || parseJiraIssueKey(input);
+        void exportAgentOutput({
+          agent: "PRD",
+          jiraId: jid || "NOJIRA",
+          subject: fullPrd.title || "PRD",
+          content: buildMd(fullPrd),
+        });
+      }
 
       if (skipClarify) {
         setPhase("done");
-        await sendCompletionNotify("PRD Agent", fullPrd.title || input.slice(0, 60) || "PRD");
+        setAllowAutoPublish(true);
+        const jid = parseJiraIssueKey(jiraIssueKey) || parseJiraIssueKey(input);
+        await sendCompletionNotify({
+          agentName: "PRD Agent",
+          identifier: fullPrd.title || input.slice(0, 60) || "PRD",
+          notifySubject: buildShareSubjectLine("prd", jid, fullPrd.title || input.slice(0, 60) || "PRD"),
+        });
       } else {
         setLoadingMsg("Generating clarifying questions…");
         const summary = Object.entries(sections).slice(0,3).map(([k,v])=>`${k}: ${String(v).slice(0,200)}`).join("\n");
@@ -577,7 +605,19 @@ export default function PRDAgent() {
       if (otherFeedback.trim()) setFeedbackMemory(prev => [...prev, otherFeedback.trim().slice(0, 200)].slice(-20));
 
       setPhase("done");
-      await sendCompletionNotify("PRD Agent", refined.title || input.slice(0, 60) || "PRD");
+      const jidRefined = parseJiraIssueKey(jiraIssueKey) || parseJiraIssueKey(input);
+      void exportAgentOutput({
+        agent: "PRD",
+        jiraId: jidRefined || "NOJIRA",
+        subject: (refined.title || "PRD") + "-refined",
+        content: buildMd(refined),
+      });
+      setAllowAutoPublish(true);
+      await sendCompletionNotify({
+        agentName: "PRD Agent",
+        identifier: refined.title || input.slice(0, 60) || "PRD",
+        notifySubject: buildShareSubjectLine("prd", jidRefined, refined.title || "PRD"),
+      });
     } catch(e) { setError("Error: "+e.message); setPhase("clarifying"); }
     setLoading(false); setLoadingMsg("");
   };
@@ -631,20 +671,27 @@ export default function PRDAgent() {
       setSelectedPresets(new Set());
       setManualFeedback("");
       setPhase("done");
-      await sendCompletionNotify("PRD Agent", (improved.title || input.slice(0, 60) || "PRD") + " (improved)");
+      {
+        const jid = parseJiraIssueKey(jiraIssueKey) || parseJiraIssueKey(input);
+        void exportAgentOutput({
+          agent: "PRD",
+          jiraId: jid || "NOJIRA",
+          subject: (improved.title || "PRD") + "-improved",
+          content: buildMd(improved),
+        });
+      }
+      setAllowAutoPublish(true);
+      const jidI = parseJiraIssueKey(jiraIssueKey) || parseJiraIssueKey(input);
+      await sendCompletionNotify({
+        agentName: "PRD Agent",
+        identifier: (improved.title || input.slice(0, 60) || "PRD") + " (improved)",
+        notifySubject: buildShareSubjectLine("prd", jidI, (improved.title || "PRD") + "-improved"),
+      });
     } catch(e) { setError("Error: "+e.message); setPhase("done"); }
     setLoading(false); setLoadingMsg("");
   };
 
   // ── Copy helpers ──────────────────────────────────────────────────────────
-  const buildMd = (p) =>
-    `# ${p.title||"UPI Switch PRD"}\n**Version:** ${p.version||"v1.0"}  |  **Date:** ${new Date().toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"numeric"})}\n\n---\n\n` +
-    PRD_SECTIONS.map(s=>`## ${s.icon} ${s.title}\n\n${p[s.key]||"_Not generated_"}`).join("\n\n---\n\n");
-
-  const buildPlainText = (p) =>
-    `${p.title||"UPI Switch PRD"}\nVersion: ${p.version||"v1.0"}  |  Date: ${new Date().toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"numeric"})}\n\n` +
-    PRD_SECTIONS.map(s=>`${"=".repeat(60)}\n${s.icon}  ${s.title}\n${"=".repeat(60)}\n\n${p[s.key]||"(Not generated)"}`).join("\n\n");
-
   const handleCopyMd = (prdData) => {
     const p = prdData||prd; if (!p) return;
     navigator.clipboard.writeText(buildMd(p)).then(()=>{
@@ -682,7 +729,16 @@ export default function PRDAgent() {
     }
   };
 
-  const handleLoadHistory = (item) => { setPrd(item.prd); setPhase("done"); setQuestions([]); setAnswers(["","","",""]); setInput(item.requirement||""); setShowHistory(false); setFeedbackLog([]); };
+  const handleLoadHistory = (item) => {
+    setAllowAutoPublish(false);
+    setPrd(item.prd);
+    setPhase("done");
+    setQuestions([]);
+    setAnswers(["","","",""]);
+    setInput(item.requirement||"");
+    setShowHistory(false);
+    setFeedbackLog([]);
+  };
   const handleDeleteHistory = async (id) => { const u=history.filter(h=>h.id!==id); setHistory(u); await saveHistory(u); };
   const handleClearHistory  = async () => { setHistory([]); await saveHistory([]); };
 
@@ -694,6 +750,7 @@ export default function PRDAgent() {
     setTermItems([]); setTermAnswers([]); setPreFeedbackCtx("");
     setSelectedPresets(new Set()); setManualFeedback(""); setShowFeedback(false); setFeedbackLog([]);
     setOtherFeedback("");
+    setAllowAutoPublish(false);
   };
 
   const otherFeedbackDocxRef = useRef();
@@ -794,7 +851,7 @@ export default function PRDAgent() {
             <span style={{ fontSize:14, fontWeight:600, color:"#F1F5F9" }}>JIRA Connector</span>
           </div>
           <div style={{ display:"flex", gap:8, flexWrap:"wrap", alignItems:"center" }}>
-            <input type="text" placeholder="e.g. TSP-1889 or paste JIRA browse URL" value={jiraIssueKey} onChange={e=>setJiraIssueKey(e.target.value)} onKeyDown={e=>{ if (e.key==="Enter") { e.preventDefault(); handleFetchJiraPRD(); } }}
+            <input type="text" placeholder="e.g. TSP-1889 or paste JIRA browse URL" value={jiraIssueKey} onChange={e=>setJiraIssueKey(e.target.value)} onBlur={()=>{ const k = parseJiraIssueKey(jiraIssueKey); if (k) syncPublishDefaultJiraKey(k); }} onKeyDown={e=>{ if (e.key==="Enter") { e.preventDefault(); handleFetchJiraPRD(); } }}
               style={{ flex:1, minWidth:200, background:"#070E1A", border:"1px solid #1E3A5F", borderRadius:8, color:"#CBD5E1", fontSize:13, padding:"8px 12px" }} />
             <button type="button" onClick={handleFetchJiraPRD} disabled={jiraFetchLoading}
               style={{ padding:"8px 16px", borderRadius:8, fontSize:12, fontWeight:600, cursor:jiraFetchLoading?"wait":"pointer", border:"none", background:"#0052CC", color:"#fff" }}>
@@ -1160,7 +1217,15 @@ export default function PRDAgent() {
                 </div>
               </div>
             </div>
-            {prd && <ShareAndScore docType="prd" title={prd.title} content={buildMd(prd)} autoPublish={Object.keys(autoPublishChannels).filter(k=>autoPublishChannels[k])} />}
+            {prd && (
+              <ShareAndScore
+                docType="prd"
+                title={prd.title}
+                jiraKey={parseJiraIssueKey(jiraIssueKey) || parseJiraIssueKey(input) || ""}
+                content={buildMd(prd)}
+                autoPublish={allowAutoPublish ? Object.keys(autoPublishChannels).filter((k) => autoPublishChannels[k]) : []}
+              />
+            )}
           </>
         )}
 

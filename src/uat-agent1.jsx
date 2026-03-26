@@ -1,6 +1,9 @@
 import { useState, useRef, useEffect } from "react";
 import { API_BASE, sendCompletionNotify } from "./config.js";
 import ShareAndScore from "./ShareAndScore.jsx";
+import { syncPublishDefaultJiraKey } from "./ConnectorsStatus.jsx";
+import { exportAgentOutput } from "./agentExport.js";
+import { buildShareSubjectLine } from "./shareSubject.js";
 
 // ── Google Font ───────────────────────────────────────────────────────────────
 const fontLink = document.createElement("link");
@@ -47,15 +50,6 @@ const DOMAINS = [
   { id: "all",            label: "All Services",    full: "All Services",               icon: "🌐", color: "#94a3b8" },
 ];
 
-const EXTRA_SCOPE_ITEMS = [
-  "End-to-End Transaction Flow Validation",
-  "Negative & Edge Case Coverage",
-  "Fund Loss Risk Validation",
-  "Reconciliation Integrity Validation",
-  "NPCI Compliance Validation",
-  "Feature Flag & Configuration Safety",
-];
-
 // ── System Prompts ────────────────────────────────────────────────────────────
 const buildSystemPrompt = (domains, objective, feedbackNote) => {
   const scopeList = domains.length > 0 ? domains.map(d => `${d.full} (${d.label})`).join(", ") : "All Services";
@@ -74,15 +68,15 @@ A table with ONLY these fields (no others):
 | JIRA ID | [from input] |
 | UAT Scope | ${scopeList} |
 
-## 2️⃣ Objective of Testing
+## 2️⃣ Objective
 ${objective ? `Use this confirmed objective: ${objective}` : "Derive from inputs. Describe what was validated in 2-3 sentences."}
 
-## 5️⃣ Acceptance Criteria Mapping
+## 5️⃣ UAT Acceptance Criteria
 Table with columns: UAT Scenario | QA Test Case ID | Result | Remarks
 Extract ALL test cases from input. Mark PASS/FAIL/BLOCKED clearly.
 
-## 3️⃣ + 4️⃣ Scope of Testing & Test Execution Summary  
-**MERGED SECTION**
+## 3️⃣ + 4️⃣ Scope Definition
+**MERGED SECTION** (scope table + test execution summary + counts below)
 
 First, a Scope table:
 | In Scope | Out of Scope |
@@ -126,13 +120,13 @@ Rules:
 - Use "Insufficient data — please supply [X]" if info is missing
 - All tables use markdown format
 - Be precise and professional
-- Start response with "# UAT SIGNOFF — TestSentinel"`;
+- Start response with "# UAT Status"`;
 };
 
 const CLARIFY_SYSTEM = `You are TestSentinel, a UAT expert for fintech and UPI payment systems.
 
 The user provided UAT inputs. Generate:
-1. First: A draft "Objective of Testing" paragraph (2-3 sentences) based on their inputs
+1. First: A draft "Objective" paragraph (2-3 sentences) based on their inputs
 2. Then: 3-6 targeted clarifying questions to improve the signoff
 
 Format your response as:
@@ -146,12 +140,6 @@ QUESTIONS:
 ...
 
 Be specific and concise.`;
-
-const FEEDBACK_SYSTEM = `You are TestSentinel. The user has provided feedback on a UAT signoff document.
-Incorporate their feedback and regenerate the improved signoff.
-Apply the same format and section structure as before.
-Focus improvements on the specific areas mentioned in the feedback.
-Start with "# UAT SIGNOFF — TestSentinel (Revised)"`;
 
 // ── History (persisted to localStorage for online/offline) ───────────────────
 const UAT_HISTORY_KEY = "uat-sentinel-history-v1";
@@ -193,6 +181,17 @@ async function readFiles(fileList) {
     contents.push({ name: f.name, content: text.slice(0, 12000) });
   }
   return { files: arr, contents };
+}
+
+/** Bedrock caps total prompt ~200k tokens; cap user context to avoid failures (mixed text ~3–4 chars/token). */
+const MAX_CLARIFY_USER_CHARS = 100_000;
+const MAX_GENERATE_USER_CHARS = 420_000;
+const MAX_FEEDBACK_USER_CHARS = 420_000;
+
+function truncateForLLM(text, maxChars) {
+  const s = String(text || "");
+  if (s.length <= maxChars) return s;
+  return `${s.slice(0, maxChars)}\n\n[TRUNCATED — input exceeded ${maxChars.toLocaleString()} characters (${s.length.toLocaleString()} total). Tail omitted to stay within model limits; shorten pastes or use fewer files for full context.]`;
 }
 
 function formatInline(t) {
@@ -275,8 +274,8 @@ function Btn({ children, variant="primary", onClick, disabled, style={}, size="m
   return <button type="button" onClick={disabled?undefined:onClick} style={{...base,...variants[variant]}}>{children}</button>;
 }
 
-function Card({ children, style={}, className="" }) {
-  return <div className={className} style={{ background:C.elevated, border:`1px solid ${C.border}`, borderRadius:12, ...style }}>{children}</div>;
+function Card({ children, style = {}, className = "", ...rest }) {
+  return <div className={className} style={{ background:C.elevated, border:`1px solid ${C.border}`, borderRadius:12, ...style }} {...rest}>{children}</div>;
 }
 
 function SectionHeader({ icon, title, tag, tagColor }) {
@@ -475,8 +474,9 @@ export default function TestSentinel() {
   const [feedbackLoading, setFeedbackLoading] = useState(false);
   const [feedbackMemory, setFeedbackMemory] = useState(() => loadUATFeedbackMemory());
 
-  // Auto-publish after generation (session option)
+  // Auto-publish only right after a new generation (not when reopening history)
   const [autoPublishChannels, setAutoPublishChannels] = useState({ jira: false, telegram: false, email: false, slack: false });
+  const [allowAutoPublish, setAllowAutoPublish] = useState(false);
   // JIRA Connector: fetch issue key input and loading
   const [jiraIssueKey, setJiraIssueKey] = useState("");
   const [jiraFetchLoading, setJiraFetchLoading] = useState(false);
@@ -512,6 +512,7 @@ export default function TestSentinel() {
       setJiraSubject(d.summary ? `${d.id} — ${d.summary}` : d.id || jiraIssueKey);
       setJiraDesc([d.description, d.acceptanceCriteria ? `Acceptance criteria:\n${d.acceptanceCriteria}` : ""].filter(Boolean).join("\n\n") || "(No description)");
       setJiraMode("type");
+      syncPublishDefaultJiraKey(d.id || key);
     } catch (e) {
       setJiraFetchError(e.message || "JIRA fetch failed");
     }
@@ -573,7 +574,7 @@ export default function TestSentinel() {
     if (!selectedDomains.length) { setStatusMsg("Please select at least one domain."); return; }
     setLoading(true); setStatusMsg("Analyzing inputs & drafting objective...");
     try {
-      const ctx = buildContext();
+      const ctx = truncateForLLM(buildContext(), MAX_CLARIFY_USER_CHARS);
       const raw = await callClaude(CLARIFY_SYSTEM, ctx);
       setClarifyRaw(raw);
       // parse draft objective
@@ -598,10 +599,13 @@ export default function TestSentinel() {
       let userMsg = ctx;
       if (clarifyAnswers.trim()) userMsg += `\nClarification Answers:\n${clarifyAnswers}\n`;
       if (feedbackMemory.length > 0) userMsg += `\nREMEMBERED FEEDBACK FROM PREVIOUS UATs (apply these improvements):\n${feedbackMemory.map(f => `- ${f}`).join("\n")}\n`;
+      userMsg = truncateForLLM(userMsg, MAX_GENERATE_USER_CHARS);
       const domains = DOMAINS.filter(d=>selectedDomains.includes(d.id));
       const signoff = await callClaude(buildSystemPrompt(domains, editedObjective, ""), userMsg);
+      const jiraKey = parseJiraIssueKey(jiraIssueKey) || parseJiraIssueKey(jiraSubject);
       const entry = saveToHistory({
         jira: jiraSubject||jiraFiles[0]?.name||"Unnamed",
+        jiraKey,
         model: MODELS.find(m=>m.id===model)?.label||model,
         domains: domains.map(d=>d.label),
         objective: editedObjective,
@@ -611,7 +615,18 @@ export default function TestSentinel() {
       setStep(3);
       setView("result");
       setStatusMsg("");
-      await sendCompletionNotify("UAT Agent", jiraSubject || jiraIssueKey || "UAT Signoff");
+      void exportAgentOutput({
+        agent: "UAT",
+        jiraId: jiraKey || "NOJIRA",
+        subject: jiraSubject || "UAT-Signoff",
+        content: signoff,
+      });
+      setAllowAutoPublish(true);
+      await sendCompletionNotify({
+        agentName: "UAT Agent",
+        identifier: jiraSubject || jiraIssueKey || "UAT Signoff",
+        notifySubject: buildShareSubjectLine("uat", jiraKey, jiraSubject || "UAT Signoff"),
+      });
     } catch(e) { setStatusMsg("Error: "+e.message); }
     finally { setLoading(false); }
   };
@@ -624,19 +639,34 @@ export default function TestSentinel() {
       let fbCtx = result.signoff+"\n\n---\nUSER FEEDBACK:\n";
       if (feedbackMode==="type") fbCtx += feedbackText;
       else feedbackFC.forEach(f=>{ fbCtx+=`[File: ${f.name}]\n${f.content}\n`; });
+      fbCtx = truncateForLLM(fbCtx, MAX_FEEDBACK_USER_CHARS);
       const domains = DOMAINS.filter(d=>result.domains?.includes(d.label));
       const improved = await callClaude(buildSystemPrompt(domains, editedObjective, feedbackText||"(see attached feedback)"), fbCtx);
+      const jiraKey = parseJiraIssueKey(jiraIssueKey) || parseJiraIssueKey(jiraSubject);
       const entry = saveToHistory({
         jira: (jiraSubject||"Feedback revision")+" (revised)",
+        jiraKey,
         model: MODELS.find(m=>m.id===model)?.label||model,
         domains: result.domains||[],
+        objective: editedObjective,
         signoff: improved
       });
       setResult({ signoff:improved, id:entry.id, domains:result.domains });
+      void exportAgentOutput({
+        agent: "UAT",
+        jiraId: jiraKey || "NOJIRA",
+        subject: (jiraSubject || "UAT-Signoff") + "-revised",
+        content: improved,
+      });
       const fbSummary = feedbackMode === "type" ? feedbackText.trim() : feedbackFC.map(f => `[${f.name}] ${f.content.slice(0, 100)}`).join("; ");
       if (fbSummary) setFeedbackMemory(prev => [...prev, fbSummary.slice(0, 200)].slice(-20));
       setFeedbackText(""); setFeedbackFiles([]); setFeedbackFC([]);
-      await sendCompletionNotify("UAT Agent", (jiraSubject || jiraIssueKey || "UAT Signoff") + " (revised)");
+      setAllowAutoPublish(true);
+      await sendCompletionNotify({
+        agentName: "UAT Agent",
+        identifier: (jiraSubject || jiraIssueKey || "UAT Signoff") + " (revised)",
+        notifySubject: buildShareSubjectLine("uat", jiraKey, (jiraSubject || "UAT Signoff") + "-revised"),
+      });
     } catch(e) { console.error(e); }
     finally { setFeedbackLoading(false); }
   };
@@ -648,6 +678,7 @@ export default function TestSentinel() {
     setClarifyAnswers(""); setResult(null); setStatusMsg(""); setFeedbackText(""); setFeedbackFiles([]); setFeedbackFC([]);
     setJiraMode("type"); setTestMode("type"); setDocsMode("type"); setFeedbackMode("type");
     setJiraIssueKey(""); setJiraFetchError("");
+    setAllowAutoPublish(false);
   };
 
   const INPUT_MODES = [{id:"type",icon:"⌨️",label:"Type / Paste"},{id:"upload",icon:"📎",label:"Upload File"}];
@@ -730,7 +761,7 @@ export default function TestSentinel() {
     </div>
   );
 
-  const NewView = () => (
+  const renderNewSession = () => (
     <div className="fade-in">
       <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:24, flexWrap:"wrap", gap:12 }}>
         <div>
@@ -755,6 +786,7 @@ export default function TestSentinel() {
                   placeholder="e.g. TSP-1889 or paste JIRA browse URL"
                   value={jiraIssueKey}
                   onChange={(e)=>setJiraIssueKey(e.target.value)}
+                  onBlur={()=>{ const k = parseJiraIssueKey(jiraIssueKey); if (k) syncPublishDefaultJiraKey(k); }}
                   onKeyDown={(e)=>{ if (e.key==="Enter") { e.preventDefault(); handleFetchJiraUAT(); } }}
                   style={{ flex:1, minWidth:200, ...inp }}
                 />
@@ -883,7 +915,7 @@ export default function TestSentinel() {
         <div className="fade-in">
           {/* Draft Objective */}
           <Card style={{ marginBottom:16, border:`1px solid ${C.gold}44` }}>
-            <SectionHeader icon="🎯" title="Objective of Testing" tag="Review & Edit" tagColor={C.gold}/>
+            <SectionHeader icon="🎯" title="Objective" tag="Review & Edit" tagColor={C.gold}/>
             <div style={{ padding:18 }}>
               <p style={{ fontSize:12, color:C.muted, margin:"0 0 12px", fontFamily:C.font, lineHeight:1.7 }}>
                 TestSentinel drafted the objective below based on your inputs. <strong style={{color:C.text}}>Edit it freely</strong> — this will define the scope boundaries for the signoff.
@@ -987,9 +1019,10 @@ export default function TestSentinel() {
       {result?.signoff && (
         <ShareAndScore
           docType="uat"
-          title="UAT Signoff"
+          title={jiraSubject || "UAT Signoff"}
+          jiraKey={parseJiraIssueKey(jiraIssueKey) || parseJiraIssueKey(jiraSubject) || ""}
           content={result.signoff}
-          autoPublish={Object.keys(autoPublishChannels).filter((k) => autoPublishChannels[k])}
+          autoPublish={allowAutoPublish ? Object.keys(autoPublishChannels).filter((k) => autoPublishChannels[k]) : []}
         />
       )}
 
@@ -1064,7 +1097,16 @@ export default function TestSentinel() {
                   <Card key={h.id} className="hover-lift" style={{ marginBottom:10, cursor:"pointer", transition:"all 0.2s" }}
                     onMouseEnter={e=>{ e.currentTarget.style.borderColor=C.gold; }}
                     onMouseLeave={e=>{ e.currentTarget.style.borderColor=C.border; }}
-                    onClick={()=>{ setResult({signoff:h.signoff,id:h.id,domains:h.domains}); setView("result"); }}
+                    onClick={()=>{
+                      if (!h.signoff || !String(h.signoff).trim()) return;
+                      setAllowAutoPublish(false);
+                      setJiraSubject(typeof h.jira === "string" ? h.jira : "");
+                      if (h.jiraKey) setJiraIssueKey(String(h.jiraKey));
+                      setEditedObjective(h.objective || "");
+                      setStep(3);
+                      setResult({ signoff: h.signoff, id: h.id, domains: h.domains || [] });
+                      setView("result");
+                    }}
                   >
                     <div style={{ padding:"14px 18px", display:"flex", alignItems:"flex-start", justifyContent:"space-between", gap:12 }}>
                       <div style={{ flex:1 }}>
@@ -1124,7 +1166,7 @@ export default function TestSentinel() {
 
       <main style={{ maxWidth:960, margin:"0 auto", padding:"28px 20px" }}>
         {view==="home" && <HomeView/>}
-        {view==="new" && <NewView/>}
+        {view==="new" && renderNewSession()}
         {view==="result" && result && <ResultView/>}
         {view==="history" && <HistoryView/>}
       </main>
