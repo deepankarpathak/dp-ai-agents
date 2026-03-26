@@ -6,6 +6,9 @@
 .pnp.js
 /build
 /prd-output
+/backend/prd-output
+/backend/agent-exports
+
 
 
 # testing
