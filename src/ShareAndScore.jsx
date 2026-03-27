@@ -27,7 +27,7 @@ const btnStyle = (primary = false) => ({
 
 /**
  * Share (JIRA, Telegram, Email, Slack) + Score (GPT 5.4) for PRD / UAT / BRD success screens.
- * @param {'prd'|'uat'|'brd'} props.docType
+ * @param {'prd'|'uat'|'brd'|'jira'} props.docType
  * @param {string} props.title - Document / J.display title
  * @param {string} props.content - Full markdown
  * @param {string} [props.jiraKey] - e.g. TSP-1889 for email subject pattern

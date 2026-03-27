@@ -337,6 +337,189 @@ app.get("/api/jira-issue/:id", async (req, res) => {
   }
 });
 
+function jiraAuthHeader() {
+  return "Basic " + Buffer.from(`${JIRA_EMAIL}:${JIRA_TOKEN}`).toString("base64");
+}
+
+function formatJiraApiError(data) {
+  if (!data || typeof data !== "object") return "JIRA request failed";
+  const msgs = data.errorMessages;
+  if (Array.isArray(msgs) && msgs.length) return msgs.join("; ");
+  const errs = data.errors;
+  if (errs && typeof errs === "object") {
+    const pairs = Object.entries(errs).map(([k, v]) => `${k}: ${v}`);
+    if (pairs.length) return pairs.join("; ");
+  }
+  return data.message || "Bad Request";
+}
+
+function buildIssuetypeField({ issueTypeName, issueTypeId }) {
+  const id =
+    (issueTypeId && String(issueTypeId).trim()) ||
+    (process.env.JIRA_ISSUE_TYPE_ID && String(process.env.JIRA_ISSUE_TYPE_ID).trim()) ||
+    "";
+  if (id) return { id };
+  const name = String(issueTypeName || process.env.JIRA_DEFAULT_ISSUE_TYPE || "Task").trim() || "Task";
+  return { name };
+}
+
+function buildSubtaskIssuetypeField({ issueTypeId, issueTypeName }) {
+  const id =
+    (issueTypeId && String(issueTypeId).trim()) ||
+    (process.env.JIRA_SUBTASK_ISSUE_TYPE_ID && String(process.env.JIRA_SUBTASK_ISSUE_TYPE_ID).trim()) ||
+    "";
+  if (id) return { id };
+  const name = String(issueTypeName || process.env.JIRA_SUBTASK_ISSUE_TYPE_NAME || "Sub-task").trim() || "Sub-task";
+  return { name };
+}
+
+async function jiraCreateIssue(fields) {
+  const r = await fetch(`${JIRA_URL}/rest/api/3/issue`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: jiraAuthHeader(),
+    },
+    body: JSON.stringify({ fields }),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    const err = new Error(formatJiraApiError(data));
+    err.status = r.status;
+    err.details = data;
+    throw err;
+  }
+  return data;
+}
+
+app.get("/api/jira/issue-types", async (req, res) => {
+  const projectKey = String(req.query.projectKey || "").trim().toUpperCase();
+  if (!projectKey) return res.status(400).json({ success: false, error: "Missing projectKey query" });
+  if (!JIRA_URL || !JIRA_EMAIL || !JIRA_TOKEN) {
+    return res.status(400).json({ success: false, error: "JIRA not configured in .env" });
+  }
+  try {
+    const url = `${JIRA_URL}/rest/api/3/issue/createmeta?projectKeys=${encodeURIComponent(projectKey)}&expand=projects.issuetypes`;
+    const r = await fetch(url, {
+      headers: { Authorization: jiraAuthHeader(), Accept: "application/json" },
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      return res.status(r.status).json({ success: false, error: formatJiraApiError(data) });
+    }
+    const proj = (data.projects || [])[0];
+    const types = (proj?.issuetypes || []).map((t) => ({
+      id: t.id,
+      name: t.name,
+      subtask: !!t.subtask,
+    }));
+    res.json({ success: true, projectKey, types });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post("/api/jira/create", async (req, res) => {
+  try {
+    const { projectKey, summary, description, issueType, issueTypeId } = req.body || {};
+    if (!projectKey || !summary || !description) {
+      return res.status(400).json({ success: false, error: "Missing projectKey, summary, or description" });
+    }
+    if (!JIRA_URL || !JIRA_EMAIL || !JIRA_TOKEN) {
+      return res.status(400).json({ success: false, error: "JIRA not configured in .env" });
+    }
+    const cleanProjectKey = String(projectKey).trim().toUpperCase();
+    const cleanSummary = String(summary).trim().slice(0, 255);
+    if (!cleanSummary) {
+      return res.status(400).json({ success: false, error: "Summary is empty — set Feature / Ticket Title or ensure the draft starts with # Title" });
+    }
+    const md = String(description);
+    const adf = markdownToJiraAdf(md)?.body;
+    const payload = {
+      project: { key: cleanProjectKey },
+      summary: cleanSummary,
+      issuetype: buildIssuetypeField({ issueTypeName: issueType, issueTypeId }),
+      ...(adf ? { description: adf } : {}),
+    };
+    const data = await jiraCreateIssue(payload);
+    const key = data.key || "";
+    res.json({
+      success: true,
+      key,
+      id: data.id,
+      self: data.self,
+      browseUrl: key ? `${JIRA_URL}/browse/${key}` : "",
+    });
+  } catch (err) {
+    const status = err.status && Number(err.status) >= 400 ? err.status : 500;
+    res.status(status).json({ success: false, error: err.message || String(err) });
+  }
+});
+
+app.post("/api/jira/create-with-subtasks", async (req, res) => {
+  try {
+    const { projectKey, parent, subtasks } = req.body || {};
+    if (!projectKey || !parent?.summary || !parent?.description) {
+      return res.status(400).json({ success: false, error: "Missing projectKey or parent.summary / parent.description" });
+    }
+    if (!JIRA_URL || !JIRA_EMAIL || !JIRA_TOKEN) {
+      return res.status(400).json({ success: false, error: "JIRA not configured in .env" });
+    }
+    const cleanProjectKey = String(projectKey).trim().toUpperCase();
+    const parentSummary = String(parent.summary).trim().slice(0, 255);
+    if (!parentSummary) return res.status(400).json({ success: false, error: "Parent summary is empty" });
+    const parentMd = String(parent.description);
+    const parentAdf = markdownToJiraAdf(parentMd)?.body;
+    const parentFields = {
+      project: { key: cleanProjectKey },
+      summary: parentSummary,
+      issuetype: buildIssuetypeField({
+        issueTypeName: parent.issueType,
+        issueTypeId: parent.issueTypeId,
+      }),
+      ...(parentAdf ? { description: parentAdf } : {}),
+    };
+    const createdParent = await jiraCreateIssue(parentFields);
+    const parentKey = createdParent.key || "";
+    const createdSubs = [];
+    const list = Array.isArray(subtasks) ? subtasks : [];
+    for (const st of list) {
+      const sum = String(st?.summary || "").trim().slice(0, 255);
+      if (!sum) continue;
+      const bodyMd = String(st?.description || st?.body || "").trim() || sum;
+      const stAdf = markdownToJiraAdf(bodyMd)?.body;
+      const subFields = {
+        project: { key: cleanProjectKey },
+        parent: { key: parentKey },
+        summary: sum,
+        issuetype: buildSubtaskIssuetypeField({
+          issueTypeId: st.issueTypeId,
+          issueTypeName: st.issueType,
+        }),
+        ...(stAdf ? { description: stAdf } : {}),
+      };
+      try {
+        const subData = await jiraCreateIssue(subFields);
+        createdSubs.push({
+          key: subData.key,
+          browseUrl: subData.key ? `${JIRA_URL}/browse/${subData.key}` : "",
+        });
+      } catch (e) {
+        createdSubs.push({ error: e.message || String(e) });
+      }
+    }
+    res.json({
+      success: true,
+      parentKey,
+      parentBrowseUrl: parentKey ? `${JIRA_URL}/browse/${parentKey}` : "",
+      subtasks: createdSubs,
+    });
+  } catch (err) {
+    const status = err.status && Number(err.status) >= 400 ? err.status : 500;
+    res.status(status).json({ success: false, error: err.message || String(err) });
+  }
+});
+
 // ── Share: JIRA comment, Telegram, Email ─────────────────────────────────────
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
 /** Corporate SSL inspection: set TELEGRAM_INSECURE_TLS=true in .env (dev only). */
@@ -498,9 +681,10 @@ const SCORE_MODEL = process.env.SCORE_MODEL || "gpt-4o";
 app.post("/api/score", async (req, res) => {
   try {
     const { type, content, title } = req.body || {};
-    if (!type || !content) return res.status(400).json({ success: false, error: "Missing type (prd|uat|brd) or content" });
+    if (!type || !content) return res.status(400).json({ success: false, error: "Missing type (prd|uat|brd|jira) or content" });
     if (!OPENAI_API_KEY) return res.status(400).json({ success: false, error: "OPENAI_API_KEY not set in .env for scoring" });
-    const docType = type === "uat" ? "UAT Signoff" : type === "brd" ? "BRD" : "PRD";
+    const docType =
+      type === "uat" ? "UAT Signoff" : type === "brd" ? "BRD" : type === "jira" ? "JIRA ticket" : "PRD";
     const systemPrompt = `You are an expert reviewer. Score the following ${docType} document on a scale of 1-10 (10 = excellent). Consider: completeness, clarity, compliance with NPCI/UPI norms, structure, and actionability. Respond with ONLY a JSON object: { "score": number, "maxScore": 10, "rationale": "2-3 sentence explanation" }. No other text.`;
     const userContent = (title ? `Document: ${title}\n\n` : "") + String(content).slice(0, 12000);
     const r = await fetch("https://api.openai.com/v1/chat/completions", {

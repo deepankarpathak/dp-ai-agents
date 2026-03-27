@@ -66,28 +66,36 @@ export default function ConnectorsStatus() {
     setJiraTestLoading(false);
   };
 
-  const connectedList = CONNECTOR_LIST.filter((c) => status[c.id]);
-  const connectedCount = connectedList.length;
+  const connectedCount = CONNECTOR_LIST.filter((c) => status[c.id]).length;
   const totalCount = CONNECTOR_LIST.length;
+  const connectorNames = CONNECTOR_LIST.map((c) => c.label).join(" · ");
 
   return (
     <>
-      <div onClick={() => setOpen(true)} style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", padding: "4px 10px", borderRadius: 10, background: "#0f172a", border: "1px solid #1e293b" }} title="Click to view or enable connectors">
-        <span style={{ fontSize: 11, color: "#64748b", fontWeight: 600, marginRight: 2 }}>Connectors</span>
-        {connectedCount > 0 ? (
-          <>
-            {connectedList.map(({ id, label, color }) => (
-              <div key={id} style={{ display: "flex", alignItems: "center", gap: 4, padding: "3px 7px", borderRadius: 6, background: `${color}22`, border: `1px solid ${color}66`, fontSize: 10, color, fontWeight: 500 }}>
-                <span style={{ width: 5, height: 5, borderRadius: "50%", background: "#22c55e" }} />
-                {label}
-              </div>
-            ))}
-            <span style={{ fontSize: 10, color: "#22c55e", fontWeight: 600 }}>{connectedCount} connected</span>
-          </>
-        ) : (
-          <span style={{ fontSize: 10, color: "#64748b" }}>0 connected</span>
-        )}
-        <span style={{ fontSize: 10, color: "#64748b", marginLeft: 2 }}>· {connectedCount}/{totalCount} · Click to enable others</span>
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={() => setOpen(true)}
+        onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setOpen(true); } }}
+        style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", padding: "4px 10px", borderRadius: 10, background: "#0f172a", border: "1px solid #1e293b", cursor: "pointer" }}
+        title="Open Connector Settings"
+      >
+        <span style={{ fontSize: 11, color: "#64748b", fontWeight: 600 }}>Connectors</span>
+
+          {/* This line is commented */}
+  {/*
+       <span style={{ fontSize: 11, color: "#94a3b8", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 260 }}>
+          {connectorNames}
+        </span>
+   
+        <span style={{ fontSize: 10, color: "#22c55e", fontWeight: 600 }}>{connectedCount} connected</span>
+        <span style={{ fontSize: 10, color: "#64748b" }}>
+          · {connectedCount}/{totalCount} · Click to enable others
+        </span>
+
+        */}
+        
+        <span style={{ marginLeft: "auto", fontSize: 11, fontWeight: 600, color: "#93c5fd" }}>Know more →</span>
       </div>
 
       {open && (

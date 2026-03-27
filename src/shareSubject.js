@@ -1,6 +1,6 @@
 /**
- * Subject / notify line: <JIRAID>-<UAT|PRD|BRD>-<JIRA-Subject>-<ISO-timestamp>
- * @param {'uat'|'prd'|'brd'} docType
+ * Subject / notify line: <JIRAID>-<UAT|PRD|BRD|JIRA>-<JIRA-Subject>-<ISO-timestamp>
+ * @param {'uat'|'prd'|'brd'|'jira'} docType
  * @param {string} [jiraKey] — e.g. TSP-1889
  * @param {string} [title] — JIRA subject or feature title
  */
