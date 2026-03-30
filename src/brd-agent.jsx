@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import { API_BASE, sendCompletionNotify } from "./config.js";
 import ShareAndScore from "./ShareAndScore.jsx";
-import { syncPublishDefaultJiraKey } from "./ConnectorsStatus.jsx";
+import { syncPublishDefaultJiraKey, loadPublishDefaults, syncPublishJiraSiteFromIssue } from "./ConnectorsStatus.jsx";
 import { exportAgentOutput } from "./agentExport.js";
 import { buildShareSubjectLine } from "./shareSubject.js";
 
@@ -141,9 +141,13 @@ function parseJiraIssueKey(input) {
 }
 
 // ── JIRA fetch via server proxy ──────────────────────────────────────────────
-async function fetchJiraIssue(issueKey) {
-  const key = encodeURIComponent(issueKey);
-  const r = await fetch(`${API_BASE}/api/jira-issue/${key}`, {
+async function fetchJiraIssue(issueKeyOrUrl) {
+  const raw = String(issueKeyOrUrl || "").trim();
+  const defs = loadPublishDefaults();
+  const site = defs.jiraWriteSite;
+  const siteQs = site && site !== "auto" ? `?site=${encodeURIComponent(site)}` : "";
+  const key = encodeURIComponent(raw);
+  const r = await fetch(`${API_BASE}/api/jira-issue/${key}${siteQs}`, {
     headers: { Accept: "application/json" },
   });
   const text = await r.text();
@@ -264,15 +268,19 @@ export default function BRDAgent() {
     const raw = jiraId.trim();
     if (!raw) { setError("Enter a JIRA issue key or paste a JIRA browse URL."); return; }
     const issueKey = parseJiraIssueKey(raw);
-    if (!issueKey) { setError("Could not find a JIRA issue key (e.g. TSP-1889). Paste the key or a full browse URL."); return; }
+    if (!issueKey && !/atlassian\.net/i.test(raw)) {
+      setError("Could not find a JIRA issue key (e.g. TSP-1889). Paste the key or a full browse URL.");
+      return;
+    }
     setLoading(true); setError(""); setStatusMsg("Fetching JIRA issue…");
     try {
-      const data = await fetchJiraIssue(issueKey);
+      const data = await fetchJiraIssue(raw);
       setJiraData(data);
       if (data.summary) setSubject(data.summary);
       if (data.description) setDescription(data.description);
       if (data.acceptanceCriteria) setAc(data.acceptanceCriteria);
-      syncPublishDefaultJiraKey(issueKey);
+      syncPublishDefaultJiraKey(data.id || issueKey);
+      syncPublishJiraSiteFromIssue(data);
       setStatusMsg("");
     } catch (e) { setError("JIRA: " + e.message); }
     setLoading(false);

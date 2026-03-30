@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useRef, useCallback } from "react";
 import { API_BASE, sendCompletionNotify } from "./config.js";
 import ShareAndScore from "./ShareAndScore.jsx";
-import { syncPublishDefaultJiraKey } from "./ConnectorsStatus.jsx";
+import { syncPublishDefaultJiraKey, loadPublishDefaults, syncPublishJiraSiteFromIssue, savePublishDefaults } from "./ConnectorsStatus.jsx";
 import { exportAgentOutput } from "./agentExport.js";
 import { buildShareSubjectLine } from "./shareSubject.js";
 
@@ -10,6 +10,59 @@ const MODELS = [
   { id: "claude-opus-4-20250514", label: "Opus 4.6", color: "#A78BFA" },
   { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5", color: "#34D399" },
 ];
+
+const DOMAINS = [
+  { id: "switch", label: "Switch", icon: "🔀", color: "#e8b84b" },
+  { id: "pms", label: "PMS", icon: "👤", color: "#60a5fa" },
+  { id: "compliance", label: "Compliance", icon: "🛡️", color: "#fbbf24" },
+  { id: "refund", label: "Refund", icon: "↩️", color: "#f87171" },
+  { id: "reconciliation", label: "Reconciliation", icon: "⚖️", color: "#a78bfa" },
+  { id: "mandates", label: "Mandates", icon: "📜", color: "#f472b6" },
+  { id: "payout", label: "Payout", icon: "💸", color: "#34d399" },
+  { id: "combination", label: "Combination", icon: "🔗", color: "#fb923c" },
+  { id: "app", label: "App", icon: "📱", color: "#38bdf8" },
+  { id: "mis", label: "MIS", icon: "📊", color: "#c084fc" },
+  { id: "all", label: "All", icon: "🌐", color: "#94a3b8" },
+];
+
+/** UI domain id → JIRA `labels` value on create (unlisted domains: no label). */
+const DOMAIN_ID_TO_JIRA_LABEL = {
+  switch: "Transaction",
+  pms: "PMS",
+  compliance: "ComplianceService",
+  refund: "Refund",
+  reconciliation: "Recon",
+  mandates: "mandate",
+};
+
+function jiraLabelsFromDomainIds(domainSet) {
+  if (!domainSet || !(domainSet instanceof Set)) return [];
+  const ids = [...domainSet];
+  const out = new Set();
+  if (ids.includes("all")) {
+    Object.values(DOMAIN_ID_TO_JIRA_LABEL).forEach((l) => out.add(l));
+    return [...out];
+  }
+  for (const id of ids) {
+    const lab = DOMAIN_ID_TO_JIRA_LABEL[id];
+    if (lab) out.add(lab);
+  }
+  return [...out];
+}
+
+function domainDisplayNamesForNotify(domainSet) {
+  if (!domainSet || !(domainSet instanceof Set)) return [];
+  const ids = [...domainSet];
+  if (ids.includes("all")) return DOMAINS.filter((d) => d.id !== "all").map((d) => d.label);
+  return DOMAINS.filter((d) => ids.includes(d.id) && d.id !== "all").map((d) => d.label);
+}
+
+function linkedJiraKeysFromHistoryItem(item) {
+  if (item?.linkedJiraKeys?.length) return item.linkedJiraKeys;
+  const jc = item?.jiraCreated;
+  if (!jc?.parentKey) return [];
+  return [jc.parentKey, ...(jc.subtasks || []).map((s) => s.key).filter(Boolean)].filter(Boolean);
+}
 
 const HISTORY_KEY = "jira-agent-history-v1";
 function loadHistory() {
@@ -76,7 +129,8 @@ Bullets: flags, phases, rollback trigger.
 ## Success metrics
 Measurable KPIs (bullets).
 
-Rules: Do not invent compliance references without tags like [TBD]. Be concise but implementation-ready.`;
+Rules: Do not invent compliance references without tags like [TBD]. Be concise but implementation-ready.
+If DOMAIN SCOPE is provided in the user message, tailor examples, systems, and test scenarios to those domains only.`;
 
 const SUBTASK_SYSTEM = `You break down a parent JIRA ticket into child work items for a UPI/fintech program.
 
@@ -295,11 +349,16 @@ function renderJiraMarkdown(md) {
 
 function HistoryPanel({ history, onLoad, onDelete, onClear, onClose }) {
   const [search, setSearch] = useState("");
-  const filtered = history.filter(
-    (h) =>
-      (h.featureName || "").toLowerCase().includes(search.toLowerCase()) ||
-      (h.resultMd || "").toLowerCase().includes(search.toLowerCase())
-  );
+  const q = search.toLowerCase();
+  const filtered = history.filter((h) => {
+    if (!q) return true;
+    const keyLine = linkedJiraKeysFromHistoryItem(h).join(" ").toLowerCase();
+    return (
+      (h.featureName || "").toLowerCase().includes(q) ||
+      (h.resultMd || "").toLowerCase().includes(q) ||
+      keyLine.includes(q)
+    );
+  });
   return (
     <div
       style={{
@@ -355,7 +414,9 @@ function HistoryPanel({ history, onLoad, onDelete, onClear, onClose }) {
             <div style={{ fontSize: 13, marginTop: 8 }}>{search ? "No results" : "No saved tickets yet"}</div>
           </div>
         ) : (
-          filtered.map((item) => (
+          filtered.map((item) => {
+            const linkedKeys = linkedJiraKeysFromHistoryItem(item);
+            return (
             <div key={item.id} style={{ background: "#0D1626", border: "1px solid #1E293B", borderRadius: 12, padding: "14px 16px", marginBottom: 10 }}>
               <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
                 <div style={{ flex: 1, minWidth: 0 }}>
@@ -364,8 +425,15 @@ function HistoryPanel({ history, onLoad, onDelete, onClear, onClose }) {
                   </div>
                   <div style={{ fontSize: 11, color: "#475569" }}>
                     {item.projectKey && <span style={{ marginRight: 8 }}>Proj {item.projectKey}</span>}
-                    {item.createdKey && <span style={{ color: "#22c55e" }}>{item.createdKey}</span>}
+                    {(item.createdKey || linkedKeys[0]) && (
+                      <span style={{ color: "#22c55e" }}>{item.createdKey || linkedKeys[0]}</span>
+                    )}
                   </div>
+                  {linkedKeys.length > 0 && (
+                    <div style={{ fontSize: 10, color: "#86efac", marginTop: 6, lineHeight: 1.45, wordBreak: "break-word" }}>
+                      Linked JIRAs: {linkedKeys.join(", ")}
+                    </div>
+                  )}
                   <div style={{ fontSize: 10, color: "#334155", marginTop: 6 }}>{item.date}</div>
                 </div>
                 <button type="button" onClick={() => onDelete(item.id)} style={{ background: "none", border: "none", color: "#334155", cursor: "pointer", fontSize: 16, alignSelf: "flex-start" }}>
@@ -391,7 +459,8 @@ function HistoryPanel({ history, onLoad, onDelete, onClear, onClose }) {
                 📂 Load session
               </button>
             </div>
-          ))
+            );
+          })
         )}
       </div>
     </div>
@@ -401,65 +470,217 @@ function HistoryPanel({ history, onLoad, onDelete, onClear, onClose }) {
 export default function JiraAgent() {
   const [model, setModel] = useState(MODELS[0]);
   const [phase, setPhase] = useState("input");
+  const [view, setView] = useState("form"); // form | result
   const [loading, setLoading] = useState(false);
   const [statusMsg, setStatusMsg] = useState("");
+  const [feedbackIncorporated, setFeedbackIncorporated] = useState(false);
 
   const [jiraIssueKey, setJiraIssueKey] = useState("");
   const [jiraFetchLoading, setJiraFetchLoading] = useState(false);
-  const [projectKey, setProjectKey] = useState("");
+  const [projectKey, setProjectKey] = useState(() =>
+    (loadPublishDefaults().jiraDefaultProjectKey || "").toUpperCase().trim()
+  );
+  /** Email, display name, or Atlassian accountId — maps to Dev Assignee custom field on create. */
+  const [devAssignee, setDevAssignee] = useState(() => loadPublishDefaults().jiraDevAssignee || "");
+  /** auto | primary | secondary — same as Connectors → Default JIRA site */
+  const [jiraWriteSite, setJiraWriteSite] = useState(() => {
+    const s = loadPublishDefaults().jiraWriteSite;
+    return ["auto", "primary", "secondary"].includes(s) ? s : "auto";
+  });
   const [issueType, setIssueType] = useState("Task");
   const [issueTypeId, setIssueTypeId] = useState("");
   const [issueTypes, setIssueTypes] = useState([]);
   const [issueTypesLoading, setIssueTypesLoading] = useState(false);
   const [issueTypesError, setIssueTypesError] = useState("");
 
+  const [selectedDomains, setSelectedDomains] = useState(() => new Set(["switch"]));
   const [featureName, setFeatureName] = useState("");
   const [requirement, setRequirement] = useState("");
   const [objective, setObjective] = useState("");
   const [clarifyQuestions, setClarifyQuestions] = useState([]);
   const [clarifyAnswers, setClarifyAnswers] = useState("");
   const [includeSubJiras, setIncludeSubJiras] = useState(false);
+  /** @type {{ id: string, name: string, extractedText: string, includeInPrompt: boolean, attachToJira: boolean, file: File }[]} */
+  const [contextFiles, setContextFiles] = useState([]);
+  const [contextUploading, setContextUploading] = useState(false);
+  const contextFileRef = useRef(null);
 
   const [resultMd, setResultMd] = useState("");
   const [subtasks, setSubtasks] = useState([]);
   const [feedback, setFeedback] = useState("");
   const [creating, setCreating] = useState(false);
   const [createdBundle, setCreatedBundle] = useState(null);
+  const [attachStatus, setAttachStatus] = useState("");
 
   const [history, setHistory] = useState(() => loadHistory());
   const [showHistory, setShowHistory] = useState(false);
+  /** History entry id used to persist linked JIRAs after create (set on generate or load). */
+  const historyAnchorRef = useRef(null);
+
+  const jiraLabelsForCreate = useMemo(() => jiraLabelsFromDomainIds(selectedDomains), [selectedDomains]);
+  const notifyDomainLabelsForCreate = useMemo(() => domainDisplayNamesForNotify(selectedDomains), [selectedDomains]);
+
+  const patchHistoryJiraCreated = useCallback((snapshot) => {
+    const anchor = historyAnchorRef.current;
+    if (!anchor) return;
+    setHistory((h) => {
+      const next = h.map((item) =>
+        item.id === anchor
+          ? {
+              ...item,
+              jiraCreated: snapshot,
+              createdKey: snapshot.parentKey,
+              linkedJiraKeys: [
+                snapshot.parentKey,
+                ...(snapshot.subtasks || []).map((s) => s.key).filter(Boolean),
+              ].filter(Boolean),
+            }
+          : item
+      );
+      saveHistoryLS(next);
+      return next;
+    });
+  }, []);
+
+  useEffect(() => {
+    const onDefaults = () => {
+      const d = loadPublishDefaults();
+      setDevAssignee(d.jiraDevAssignee || "");
+      const s = d.jiraWriteSite;
+      if (["auto", "primary", "secondary"].includes(s)) setJiraWriteSite(s);
+      const pk = (d.jiraDefaultProjectKey || "").toUpperCase().trim();
+      if (pk) setProjectKey((prev) => (prev.trim() ? prev : pk));
+    };
+    window.addEventListener("publish-defaults-changed", onDefaults);
+    return () => window.removeEventListener("publish-defaults-changed", onDefaults);
+  }, []);
+
+  const resolvedDevAssignee = useMemo(
+    () => devAssignee.trim() || loadPublishDefaults().jiraDevAssignee?.trim() || undefined,
+    [devAssignee]
+  );
 
   const docTitle = useMemo(() => extractTitle(resultMd), [resultMd]);
   const derivedJiraKey = createdBundle?.parentKey || parseJiraIssueKey(jiraIssueKey);
+  const jiraCreatedKey = createdBundle?.parentKey || "";
   const displayTitle = featureName.trim() || docTitle || "JIRA Ticket";
+
+  const toggleDomain = (id) => {
+    setSelectedDomains((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        if (next.size <= 1) return next;
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  };
+
+  const domainLabels = useMemo(
+    () =>
+      [...selectedDomains]
+        .map((id) => DOMAINS.find((d) => d.id === id)?.label)
+        .filter(Boolean)
+        .join(", "),
+    [selectedDomains]
+  );
 
   const buildContext = () => {
     const parts = [];
     if (featureName.trim()) parts.push(`Feature / title: ${featureName.trim()}`);
+    if (domainLabels) parts.push(`DOMAIN SCOPE (multi-select): ${domainLabels}. Constrain analysis to these domains.`);
     if (projectKey.trim()) parts.push(`JIRA Project Key: ${projectKey.trim().toUpperCase()}`);
     if (jiraIssueKey.trim()) parts.push(`Reference JIRA: ${jiraIssueKey.trim()}`);
     if (objective.trim()) parts.push(`Objective:\n${objective.trim()}`);
     if (requirement.trim()) parts.push(`Requirement / context:\n${requirement.trim()}`);
+    contextFiles
+      .filter((f) => f.includeInPrompt && f.extractedText?.trim())
+      .forEach((f) => parts.push(`--- Uploaded file: ${f.name} ---\n${f.extractedText}`));
     return parts.join("\n\n");
   };
 
+  const handleContextFilesChange = async (e) => {
+    const list = Array.from(e.target.files || []);
+    e.target.value = "";
+    if (!list.length) return;
+    setContextUploading(true);
+    for (const file of list) {
+      const id = `${Date.now()}_${file.name}_${Math.random().toString(36).slice(2)}`;
+      const lower = file.name.toLowerCase();
+      const ok = /\.(docx|pdf|xlsx|xls|txt|csv|md)$/i.test(lower);
+      if (!ok) {
+        setStatusMsg(`Skipped ${file.name} — use .docx, .pdf, .xlsx, .xls, .txt, .csv, or .md`);
+        continue;
+      }
+      try {
+        const form = new FormData();
+        form.append("file", file);
+        const r = await fetch(`${API_BASE}/api/extract-context-file`, { method: "POST", body: form });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.error || `Extract failed ${r.status}`);
+        setContextFiles((prev) => [
+          ...prev,
+          {
+            id,
+            name: file.name,
+            extractedText: d.text || "",
+            includeInPrompt: true,
+            attachToJira: false,
+            file,
+          },
+        ]);
+      } catch (err) {
+        setStatusMsg(`Could not read ${file.name}: ${err.message}`);
+      }
+    }
+    setContextUploading(false);
+  };
+
+  const uploadJiraAttachments = async (issueKey) => {
+    const key = String(issueKey || "").trim().toUpperCase();
+    if (!key) return;
+    const files = contextFiles.filter((f) => f.attachToJira && f.file);
+    if (!files.length) return;
+    setAttachStatus("Uploading attachments…");
+    try {
+      const form = new FormData();
+      form.append("issueKey", key);
+      if (jiraWriteSite !== "auto") form.append("jiraSite", jiraWriteSite);
+      files.forEach((f) => form.append("files", f.file, f.name));
+      const r = await fetch(`${API_BASE}/api/jira/attach`, { method: "POST", body: form });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || `Attach failed ${r.status}`);
+      setAttachStatus(`Attached ${Array.isArray(d.attachments) ? d.attachments.length : files.length} file(s) to ${key}.`);
+    } catch (e) {
+      setAttachStatus(`Attachments: ${e.message}`);
+    }
+  };
+
   const fetchJiraIntoRequirement = async () => {
-    const key = parseJiraIssueKey(jiraIssueKey);
-    if (!key) {
+    const raw = jiraIssueKey.trim();
+    const key = parseJiraIssueKey(raw);
+    if (!key && !raw) {
       setStatusMsg("Enter a JIRA key (e.g. TSP-1889) or paste a browse URL.");
       return;
     }
     setJiraFetchLoading(true);
     setStatusMsg("");
     try {
-      const r = await fetch(`${API_BASE}/api/jira-issue/${encodeURIComponent(key)}`, { headers: { Accept: "application/json" } });
+      const idParam = raw || key;
+      const siteQs = jiraWriteSite !== "auto" ? `?site=${encodeURIComponent(jiraWriteSite)}` : "";
+      const r = await fetch(`${API_BASE}/api/jira-issue/${encodeURIComponent(idParam)}${siteQs}`, { headers: { Accept: "application/json" } });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d.error || `JIRA error ${r.status}`);
       const block = [d.summary ? `${d.id} — ${d.summary}` : d.id, d.description, d.acceptanceCriteria ? `Acceptance criteria:\n${d.acceptanceCriteria}` : ""]
         .filter(Boolean)
         .join("\n\n");
       setRequirement((prev) => (prev ? `${prev}\n\n---\n\n${block}` : block));
-      syncPublishDefaultJiraKey(d.id || key);
+      const resolvedKey = d.id || key;
+      if (resolvedKey) syncPublishDefaultJiraKey(resolvedKey);
+      syncPublishJiraSiteFromIssue(d);
+      if (d.jiraSite === "secondary" || d.jiraSite === "primary") setJiraWriteSite(d.jiraSite);
       setStatusMsg(`Loaded ${d.id}`);
     } catch (e) {
       setStatusMsg("Error: " + e.message);
@@ -477,7 +698,9 @@ export default function JiraAgent() {
     setIssueTypesLoading(true);
     setIssueTypesError("");
     try {
-      const r = await fetch(`${API_BASE}/api/jira/issue-types?projectKey=${encodeURIComponent(pk)}`);
+      const qs = new URLSearchParams({ projectKey: pk });
+      if (jiraWriteSite !== "auto") qs.set("jiraSite", jiraWriteSite);
+      const r = await fetch(`${API_BASE}/api/jira/issue-types?${qs}`);
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
       if (!d.success) throw new Error(d.error || "Failed to load issue types");
@@ -498,11 +721,12 @@ export default function JiraAgent() {
   useEffect(() => {
     setIssueTypeId("");
     setIssueTypes([]);
-  }, [projectKey]);
+  }, [projectKey, jiraWriteSite]);
 
   const handleClarify = async () => {
-    if (!requirement.trim()) {
-      setStatusMsg("Please enter requirement/context first.");
+    const filePromptText = contextFiles.some((f) => f.includeInPrompt && String(f.extractedText || "").trim());
+    if (!requirement.trim() && !filePromptText) {
+      setStatusMsg("Enter requirement text and/or upload files with “Include text in AI prompt” checked.");
       return;
     }
     setLoading(true);
@@ -530,6 +754,11 @@ export default function JiraAgent() {
   };
 
   const handleGenerate = async () => {
+    const filePromptText = contextFiles.some((f) => f.includeInPrompt && String(f.extractedText || "").trim());
+    if (!requirement.trim() && !filePromptText) {
+      setStatusMsg("Enter requirement text and/or include uploaded file text in the AI prompt.");
+      return;
+    }
     setLoading(true);
     setStatusMsg("Generating JIRA ticket…");
     setCreatedBundle(null);
@@ -557,6 +786,9 @@ export default function JiraAgent() {
       }
       setSubtasks(nextSubs);
       setPhase("done");
+      setView("result");
+      setFeedbackIncorporated(false);
+      setAttachStatus("");
       setStatusMsg(nextSubs.length ? `Draft ready — ${nextSubs.length} sub-JIRAs proposed.` : "Draft ready.");
 
       const entry = {
@@ -568,6 +800,7 @@ export default function JiraAgent() {
         issueTypeId,
         objective,
         requirement: requirement.slice(0, 500),
+        selectedDomains: [...selectedDomains],
         resultMd: md,
         subtasks: nextSubs,
         model: model.label,
@@ -575,6 +808,7 @@ export default function JiraAgent() {
       const updated = [entry, ...history].slice(0, 50);
       setHistory(updated);
       saveHistoryLS(updated);
+      historyAnchorRef.current = entry.id;
 
       void exportAgentOutput({
         agent: "JIRA",
@@ -603,7 +837,8 @@ export default function JiraAgent() {
       const improved = await callLLM(FEEDBACK_SYSTEM, truncateForLLM(prompt, MAX_GENERATE_CHARS), 8000, model.id);
       setResultMd(improved);
       setFeedback("");
-      setStatusMsg("Improved.");
+      setFeedbackIncorporated(true);
+      setStatusMsg("Feedback incorporated.");
     } catch (e) {
       setStatusMsg("Error: " + e.message);
     } finally {
@@ -632,13 +867,30 @@ export default function JiraAgent() {
         issueTypeId: issueTypeId || undefined,
         summary,
         description: resultMd,
+        devAssignee: resolvedDevAssignee,
+        labels: jiraLabelsForCreate,
+        notifyDomainLabels: notifyDomainLabelsForCreate,
+        ...(jiraWriteSite !== "auto" ? { jiraSite: jiraWriteSite } : {}),
       });
-      setCreatedBundle({ parentKey: data.key, subtasks: [] });
+      setCreatedBundle({ parentKey: data.key, parentBrowseUrl: data.browseUrl || "", subtasks: [] });
       setJiraIssueKey(data.key || "");
-      if (data.key) syncPublishDefaultJiraKey(data.key);
+      if (data.key) {
+        syncPublishDefaultJiraKey(data.key);
+        patchHistoryJiraCreated({
+          parentKey: data.key,
+          parentBrowseUrl: data.browseUrl || "",
+          subtasks: [],
+        });
+      }
       setStatusMsg(data.key ? `Created ${data.key}` : "Created.");
+      if (data.key) await uploadJiraAttachments(data.key);
     } catch (e) {
-      setStatusMsg("Error: " + e.message);
+      const msg = "Error: " + (e?.message || String(e));
+      console.error("[JiraAgent] Create JIRA failed:", msg);
+      setStatusMsg(msg);
+      setTimeout(() => {
+        document.getElementById("jira-agent-status-banner")?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      }, 0);
     } finally {
       setCreating(false);
     }
@@ -664,6 +916,10 @@ export default function JiraAgent() {
     try {
       const data = await apiJson("/api/jira/create-with-subtasks", {
         projectKey: pk,
+        devAssignee: resolvedDevAssignee,
+        labels: jiraLabelsForCreate,
+        notifyDomainLabels: notifyDomainLabelsForCreate,
+        ...(jiraWriteSite !== "auto" ? { jiraSite: jiraWriteSite } : {}),
         parent: {
           summary,
           description: resultMd,
@@ -679,6 +935,11 @@ export default function JiraAgent() {
       if (data.parentKey) {
         setJiraIssueKey(data.parentKey);
         syncPublishDefaultJiraKey(data.parentKey);
+        patchHistoryJiraCreated({
+          parentKey: data.parentKey,
+          parentBrowseUrl: data.parentBrowseUrl || "",
+          subtasks: (data.subtasks || []).filter((s) => s.key).map((s) => ({ key: s.key, browseUrl: s.browseUrl || "" })),
+        });
       }
       const okSubs = (data.subtasks || []).filter((s) => s.key).length;
       setStatusMsg(
@@ -686,8 +947,14 @@ export default function JiraAgent() {
           ? `Created parent ${data.parentKey} and ${okSubs}/${subtasks.length} sub-JIRAs (see errors on failed rows in server log if any).`
           : "Create finished."
       );
+      if (data.parentKey) await uploadJiraAttachments(data.parentKey);
     } catch (e) {
-      setStatusMsg("Error: " + e.message);
+      const msg = "Error: " + (e?.message || String(e));
+      console.error("[JiraAgent] Create with subtasks failed:", msg);
+      setStatusMsg(msg);
+      setTimeout(() => {
+        document.getElementById("jira-agent-status-banner")?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      }, 0);
     } finally {
       setCreating(false);
     }
@@ -695,27 +962,65 @@ export default function JiraAgent() {
 
   const resetSession = () => {
     setPhase("input");
+    setView("form");
     setResultMd("");
     setSubtasks([]);
     setClarifyQuestions([]);
     setClarifyAnswers("");
     setCreatedBundle(null);
     setFeedback("");
+    setFeedbackIncorporated(false);
     setStatusMsg("");
+    setAttachStatus("");
+  };
+
+  const startNewJira = () => {
+    resetSession();
+    setFeatureName("");
+    setRequirement("");
+    setObjective("");
+    const d = loadPublishDefaults();
+    setProjectKey((d.jiraDefaultProjectKey || "").toUpperCase().trim());
+    setDevAssignee(d.jiraDevAssignee || "");
+    setJiraIssueKey("");
+    setContextFiles([]);
+    setSelectedDomains(new Set(["switch"]));
+    setIncludeSubJiras(false);
+    setIssueType("Task");
+    setIssueTypeId("");
+    setIssueTypes([]);
   };
 
   const loadFromHistory = (item) => {
+    historyAnchorRef.current = item.id;
     setFeatureName(item.featureName || "");
     setProjectKey(item.projectKey || "");
     setIssueType(item.issueType || "Task");
     setIssueTypeId(item.issueTypeId || "");
+    if (Array.isArray(item.selectedDomains) && item.selectedDomains.length) {
+      setSelectedDomains(new Set(item.selectedDomains));
+    }
     setObjective(item.objective || "");
     setRequirement(item.requirement || "");
     setResultMd(item.resultMd || "");
     setSubtasks(Array.isArray(item.subtasks) ? item.subtasks : []);
+    setContextFiles([]);
     setPhase(item.resultMd ? "done" : "input");
+    setView(item.resultMd ? "result" : "form");
     setShowHistory(false);
-    setCreatedBundle(null);
+    if (item.jiraCreated?.parentKey) {
+      setCreatedBundle({
+        parentKey: item.jiraCreated.parentKey,
+        parentBrowseUrl: item.jiraCreated.parentBrowseUrl || "",
+        subtasks: item.jiraCreated.subtasks || [],
+      });
+      setJiraIssueKey(item.jiraCreated.parentKey);
+    } else {
+      setCreatedBundle(null);
+      setJiraIssueKey("");
+    }
+    setFeedbackIncorporated(false);
+    setAttachStatus("");
     setStatusMsg("Loaded from history");
   };
 
@@ -729,7 +1034,132 @@ export default function JiraAgent() {
     saveHistoryLS([]);
   };
 
-  const phaseStep = phase === "input" ? 0 : phase === "clarify" ? 1 : 2;
+  const stepMeta = [
+    { id: "input", label: "Inputs" },
+    { id: "clarify", label: "Clarify" },
+    { id: "ticket", label: "Ticket" },
+    { id: "refine", label: "Refine" },
+    { id: "done", label: "Done" },
+  ];
+  let activeStepIdx = 0;
+  if (view === "form" && resultMd) activeStepIdx = 2;
+  else if (view === "form" && phase === "clarify") activeStepIdx = 1;
+  else if (view === "result" && resultMd && !jiraCreatedKey) activeStepIdx = 2;
+  else if (view === "result" && jiraCreatedKey && !feedbackIncorporated) activeStepIdx = 3;
+  else if (feedbackIncorporated) activeStepIdx = 4;
+  else if (view === "result" && resultMd) activeStepIdx = 2;
+
+  const ResultPanel = () => (
+    <>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center", marginBottom: 16 }}>
+        <button
+          type="button"
+          onClick={() => setView("form")}
+          style={{ background: "#111827", border: "1px solid #334155", borderRadius: 8, padding: "8px 14px", color: "#93C5FD", fontSize: 12, fontWeight: 600, cursor: "pointer" }}
+        >
+          ← Edit inputs
+        </button>
+        {attachStatus && <span style={{ fontSize: 11, color: "#94a3b8" }}>{attachStatus}</span>}
+      </div>
+      <div style={{ background: "#0A1120", border: "1px solid #1E3A5F", borderRadius: 14, padding: "28px 32px", marginBottom: 20 }}>
+        <div style={{ borderBottom: "2px solid #1E3A5F", paddingBottom: 16, marginBottom: 20 }}>
+          <div style={{ fontSize: 11, color: "#38BDF8", fontWeight: 700, letterSpacing: 2, textTransform: "uppercase", marginBottom: 8 }}>JIRA ticket draft</div>
+          <div style={{ fontSize: 22, fontWeight: 700, color: "#F1F5F9" }}>{displayTitle}</div>
+          <div style={{ fontSize: 12, color: "#475569", marginTop: 6 }}>
+            {projectKey ? `${projectKey} · ` : ""}
+            {issueType}
+            {domainLabels ? ` · ${domainLabels}` : ""}
+          </div>
+        </div>
+        <div style={{ lineHeight: 1.75 }}>{renderJiraMarkdown(resultMd)}</div>
+      </div>
+
+      {subtasks.length > 0 && (
+        <div style={{ background: "#0D1626", border: "1px solid #1E293B", borderRadius: 14, padding: 24, marginBottom: 20 }}>
+          <div style={{ fontSize: 14, fontWeight: 700, color: "#A78BFA", marginBottom: 12 }}>Proposed sub-JIRAs ({subtasks.length})</div>
+          <p style={{ fontSize: 12, color: "#64748b", marginBottom: 14 }}>
+            Use <strong style={{ color: "#E2E8F0" }}>Create parent + sub-JIRAs</strong> to push all at once. Sub-task type must be enabled in JIRA; override in <code style={{ background: "#111827", padding: "2px 6px", borderRadius: 4 }}>.env</code> if needed.
+          </p>
+          {subtasks.map((s, i) => (
+            <div key={i} style={{ border: "1px solid #1E293B", borderRadius: 10, padding: 14, marginBottom: 10, background: "#0B1220" }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: "#E2E8F0", marginBottom: 8 }}>{s.summary || `Subtask ${i + 1}`}</div>
+              <div style={{ fontSize: 12, color: "#94A3B8" }}>{(s.description || "").slice(0, 400)}{(s.description || "").length > 400 ? "…" : ""}</div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginBottom: 20 }}>
+        <button
+          type="button"
+          onClick={() => navigator.clipboard.writeText(resultMd)}
+          style={{ background: "linear-gradient(135deg,#1D4ED8,#2563EB)", border: "none", borderRadius: 9, padding: "10px 18px", color: "#fff", fontSize: 12, fontWeight: 700, cursor: "pointer" }}
+        >
+          📋 Copy markdown
+        </button>
+        <button type="button" onClick={handleCreateJira} disabled={creating} style={{ background: "#0052CC", border: "none", borderRadius: 9, padding: "10px 18px", color: "#fff", fontSize: 12, fontWeight: 700, cursor: creating ? "wait" : "pointer" }}>
+          {creating ? "Creating…" : "Create JIRA (parent only)"}
+        </button>
+        <button
+          type="button"
+          onClick={handleCreateWithSubtasks}
+          disabled={creating || !subtasks.length}
+          style={{
+            background: subtasks.length ? "#7C3AED" : "#334155",
+            border: "none",
+            borderRadius: 9,
+            padding: "10px 18px",
+            color: "#fff",
+            fontSize: 12,
+            fontWeight: 700,
+            cursor: creating || !subtasks.length ? "not-allowed" : "pointer",
+          }}
+        >
+          Create parent + sub-JIRAs
+        </button>
+        {createdBundle?.parentBrowseUrl && (
+          <a href={createdBundle.parentBrowseUrl} target="_blank" rel="noreferrer" style={{ alignSelf: "center", color: "#7DD3FC", fontSize: 13, fontWeight: 600 }}>
+            Open {createdBundle.parentKey}
+          </a>
+        )}
+        {createdBundle?.subtasks?.some((s) => s.browseUrl) && (
+          <div style={{ width: "100%", fontSize: 11, color: "#94a3b8", lineHeight: 1.6 }}>
+            Sub-JIRAs:{" "}
+            {createdBundle.subtasks
+              .filter((s) => s.browseUrl)
+              .map((s) => (
+                <span key={s.key} style={{ marginRight: 10 }}>
+                  <a href={s.browseUrl} target="_blank" rel="noreferrer" style={{ color: "#A78BFA", fontWeight: 600 }}>
+                    {s.key}
+                  </a>
+                </span>
+              ))}
+          </div>
+        )}
+      </div>
+
+      <div style={{ background: "#0D1626", border: "1px solid #1E293B", borderRadius: 14, padding: 24, marginBottom: 20 }}>
+        <div style={{ fontSize: 13, fontWeight: 700, color: "#F1F5F9", marginBottom: 10 }}>Refine (after JIRA is created, use feedback to revise the draft)</div>
+        <textarea
+          value={feedback}
+          onChange={(e) => setFeedback(e.target.value)}
+          rows={4}
+          placeholder="Feedback for the next revision"
+          style={{ width: "100%", background: "#0B1220", border: "1px solid #1E293B", borderRadius: 8, color: "#E2E8F0", padding: "10px 12px", fontSize: 12 }}
+        />
+        <button
+          type="button"
+          onClick={handleImprove}
+          disabled={loading || !feedback.trim()}
+          style={{ marginTop: 10, background: "linear-gradient(135deg,#A78BFA,#6366F1)", border: "none", borderRadius: 8, padding: "8px 16px", color: "#fff", fontSize: 12, fontWeight: 600, cursor: "pointer" }}
+        >
+          {loading ? "Improving…" : "Apply feedback"}
+        </button>
+      </div>
+
+      <ShareAndScore docType="jira" title={displayTitle} content={resultMd} jiraKey={derivedJiraKey} jiraShareSite={jiraWriteSite} autoPublish={[]} />
+    </>
+  );
 
   return (
     <div style={{ fontFamily: "'IBM Plex Sans','Segoe UI',sans-serif", background: "#0B1120", minHeight: "100vh", color: "#E2E8F0" }}>
@@ -751,36 +1181,88 @@ export default function JiraAgent() {
             <div style={{ fontSize: 10, color: "#374151", letterSpacing: 0.5 }}>Clarify · Parent + sub-JIRAs · Share · History</div>
           </div>
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          {["Inputs", "Clarify", "Ticket"].map((label, i) => (
-            <div key={label} style={{ display: "flex", alignItems: "center", gap: 4 }}>
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 4,
-                  padding: "3px 9px",
-                  borderRadius: 20,
-                  background: phaseStep > i ? "#38BDF818" : phaseStep === i ? "#1E3A5F" : "transparent",
-                  border: `1px solid ${phaseStep > i ? "#38BDF844" : phaseStep === i ? "#3B82F6" : "#1E293B"}`,
-                }}
-              >
-                <div style={{ width: 5, height: 5, borderRadius: "50%", background: phaseStep > i ? "#38BDF8" : phaseStep === i ? "#3B82F6" : "#1E293B" }} />
-                <span style={{ fontSize: 10, color: phaseStep > i ? "#38BDF8" : phaseStep === i ? "#93C5FD" : "#374151", fontWeight: 500 }}>{label}</span>
+        <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", justifyContent: "flex-end", maxWidth: "52%", flex: 1 }}>
+          {stepMeta.map((s, i) => {
+            const done = i < activeStepIdx;
+            const active = i === activeStepIdx;
+            const refineLocked = s.id === "refine" && !jiraCreatedKey;
+            const doneLocked = s.id === "done" && !feedbackIncorporated;
+            const muted = (s.id === "refine" && refineLocked) || (s.id === "done" && doneLocked);
+            return (
+              <div key={s.id} style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                <div
+                  title={s.id === "refine" ? "Unlocked after Create JIRA" : s.id === "done" ? "Unlocked after Apply feedback" : ""}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 4,
+                    padding: "3px 8px",
+                    borderRadius: 20,
+                    background: done ? "#38BDF818" : active ? "#1E3A5F" : "transparent",
+                    border: `1px solid ${done ? "#38BDF844" : active ? "#3B82F6" : "#1E293B"}`,
+                    opacity: muted && !active ? 0.55 : 1,
+                  }}
+                >
+                  <div style={{ width: 5, height: 5, borderRadius: "50%", background: done ? "#38BDF8" : active ? "#3B82F6" : "#1E293B" }} />
+                  <span style={{ fontSize: 9, color: done ? "#38BDF8" : active ? "#93C5FD" : "#475569", fontWeight: 500 }}>{s.label}</span>
+                </div>
+                {i < stepMeta.length - 1 && <div style={{ width: 8, height: 1, background: done ? "#38BDF844" : "#1E293B" }} />}
               </div>
-              {i < 2 && <div style={{ width: 10, height: 1, background: phaseStep > i ? "#38BDF844" : "#1E293B" }} />}
-            </div>
-          ))}
+            );
+          })}
+          <button
+            type="button"
+            onClick={startNewJira}
+            style={{
+              background: "linear-gradient(135deg,#0EA5E9,#2563EB)",
+              border: "none",
+              borderRadius: 9,
+              padding: "6px 12px",
+              color: "#fff",
+              fontSize: 11,
+              fontWeight: 700,
+              cursor: "pointer",
+              marginLeft: 8,
+            }}
+          >
+            + New JIRA
+          </button>
           <button
             type="button"
             onClick={() => setShowHistory(true)}
-            style={{ background: "#0D1626", border: "1px solid #1E3A5F", borderRadius: 9, padding: "5px 12px", color: "#93C5FD", fontSize: 11, fontWeight: 600, cursor: "pointer", marginLeft: 6 }}
+            style={{ background: "#0D1626", border: "1px solid #1E3A5F", borderRadius: 9, padding: "5px 12px", color: "#93C5FD", fontSize: 11, fontWeight: 600, cursor: "pointer" }}
           >
             📋 History {history.length > 0 && <span style={{ background: "#1E3A5F", borderRadius: 10, padding: "1px 6px", fontSize: 10, color: "#38BDF8", fontWeight: 700 }}>{history.length}</span>}
           </button>
         </div>
       </div>
 
+      {statusMsg ? (
+        <div
+          role="alert"
+          id="jira-agent-status-banner"
+          style={{
+            position: "sticky",
+            top: 40,
+            zIndex: 50,
+            padding: "12px 24px",
+            fontSize: 13,
+            lineHeight: 1.45,
+            background: statusMsg.startsWith("Error") ? "#450a0a" : "#0c1e3d",
+            color: statusMsg.startsWith("Error") ? "#fecaca" : "#7dd3fc",
+            borderBottom: "1px solid #1e293b",
+            fontWeight: statusMsg.startsWith("Error") ? 600 : 400,
+          }}
+        >
+          {statusMsg}
+        </div>
+      ) : null}
+
+      {view === "result" && resultMd ? (
+        <div style={{ maxWidth: 960, margin: "0 auto", padding: "28px 20px 100px" }}>
+          <ResultPanel />
+        </div>
+      ) : (
       <div style={{ maxWidth: 920, margin: "0 auto", padding: "28px 20px 100px" }}>
         <div style={{ background: "#0D1626", border: "1px solid #1E293B", borderRadius: 14, padding: 24, marginBottom: 20 }}>
           <div style={{ fontSize: 12, fontWeight: 700, color: "#38BDF8", marginBottom: 12 }}>JIRA connector</div>
@@ -790,9 +1272,26 @@ export default function JiraAgent() {
               <input
                 value={jiraIssueKey}
                 onChange={(e) => setJiraIssueKey(e.target.value)}
-                placeholder="TSP-1889 or URL"
+                placeholder="TSP-18, TPAP-113, TPG-1, or paste browse URL"
                 style={{ width: "100%", marginTop: 4, background: "#0B1220", border: "1px solid #1E293B", borderRadius: 8, color: "#E2E8F0", padding: "8px 12px", fontSize: 12 }}
               />
+            </div>
+            <div style={{ flex: "0 0 200px" }}>
+              <label style={{ fontSize: 10, color: "#64748b", textTransform: "uppercase" }}>Site (key only)</label>
+              <select
+                value={jiraWriteSite}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  setJiraWriteSite(v);
+                  const cur = loadPublishDefaults();
+                  savePublishDefaults({ ...cur, jiraWriteSite: v });
+                }}
+                style={{ width: "100%", marginTop: 4, background: "#0B1220", border: "1px solid #1E293B", borderRadius: 8, color: "#E2E8F0", padding: "8px 10px", fontSize: 12 }}
+              >
+                <option value="auto">Auto</option>
+                <option value="primary">TSP</option>
+                <option value="secondary">TPAP</option>
+              </select>
             </div>
             <button
               type="button"
@@ -827,6 +1326,34 @@ export default function JiraAgent() {
                 {m.label}
               </button>
             ))}
+          </div>
+
+          <div style={{ marginTop: 14 }}>
+            <div style={{ fontSize: 10, color: "#64748b", textTransform: "uppercase", marginBottom: 8 }}>Domains (multi-select)</div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+              {DOMAINS.map((d) => (
+                <button
+                  key={d.id}
+                  type="button"
+                  onClick={() => toggleDomain(d.id)}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 6,
+                    padding: "6px 10px",
+                    borderRadius: 8,
+                    border: selectedDomains.has(d.id) ? `1px solid ${d.color}` : "1px solid #1E293B",
+                    background: selectedDomains.has(d.id) ? `${d.color}18` : "#0B1220",
+                    color: selectedDomains.has(d.id) ? d.color : "#64748b",
+                    fontSize: 11,
+                    fontWeight: 600,
+                    cursor: "pointer",
+                  }}
+                >
+                  <span>{d.icon}</span> {d.label}
+                </button>
+              ))}
+            </div>
           </div>
 
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
@@ -886,6 +1413,20 @@ export default function JiraAgent() {
           </div>
 
           <div style={{ marginTop: 12 }}>
+            <label style={{ fontSize: 10, color: "#64748b", textTransform: "uppercase" }}>Dev assignee (if required by JIRA)</label>
+            <input
+              value={devAssignee}
+              onChange={(e) => setDevAssignee(e.target.value)}
+              placeholder="e.g. Deepankar.pathak@finmate.tech or display name or Atlassian account ID"
+              style={{ width: "100%", marginTop: 4, background: "#0B1220", border: "1px solid #1E293B", borderRadius: 8, color: "#E2E8F0", padding: "8px 12px", fontSize: 12 }}
+            />
+            <div style={{ fontSize: 10, color: "#64748b", marginTop: 4 }}>
+              Also set under <strong style={{ color: "#94a3b8" }}>Connectors → Save defaults</strong>. Server can set <code style={{ background: "#111827", padding: "2px 6px", borderRadius: 4 }}>JIRA_DEV_ASSIGNEE</code> or{" "}
+              <code style={{ background: "#111827", padding: "2px 6px", borderRadius: 4 }}>JIRA_DEV_ASSIGNEE_ACCOUNT_ID</code> in <code style={{ background: "#111827", padding: "2px 6px", borderRadius: 4 }}>.env</code>.
+            </div>
+          </div>
+
+          <div style={{ marginTop: 12 }}>
             <label style={{ fontSize: 10, color: "#64748b", textTransform: "uppercase" }}>Feature / ticket title (summary)</label>
             <input
               value={featureName}
@@ -904,6 +1445,50 @@ export default function JiraAgent() {
               placeholder="Paste BRD snippet, incident notes, or specs…"
               style={{ width: "100%", marginTop: 4, background: "#0B1220", border: "1px solid #1E293B", borderRadius: 8, color: "#E2E8F0", padding: "10px 12px", fontSize: 12, resize: "vertical", minHeight: 120 }}
             />
+            <input ref={contextFileRef} type="file" multiple accept=".docx,.pdf,.xlsx,.xls,.txt,.csv,.md" style={{ display: "none" }} onChange={handleContextFilesChange} />
+            <div style={{ marginTop: 10, display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
+              <button
+                type="button"
+                onClick={() => contextFileRef.current?.click()}
+                disabled={contextUploading}
+                style={{ background: "#111827", border: "1px solid #334155", borderRadius: 8, padding: "8px 12px", color: "#93C5FD", fontSize: 11, fontWeight: 600, cursor: "pointer" }}
+              >
+                {contextUploading ? "Reading files…" : "📎 Upload documents"}
+              </button>
+              <span style={{ fontSize: 10, color: "#64748b" }}>.docx · .pdf · .xlsx · .xls · .txt · .csv · .md</span>
+            </div>
+            {contextFiles.length > 0 && (
+              <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 8 }}>
+                {contextFiles.map((cf) => (
+                  <div key={cf.id} style={{ background: "#0B1220", border: "1px solid #1E293B", borderRadius: 8, padding: 10, fontSize: 11 }}>
+                    <div style={{ fontWeight: 600, color: "#E2E8F0", marginBottom: 8 }}>{cf.name}</div>
+                    <label style={{ display: "flex", alignItems: "center", gap: 6, color: "#94A3B8", cursor: "pointer", marginBottom: 4 }}>
+                      <input
+                        type="checkbox"
+                        checked={cf.includeInPrompt}
+                        onChange={(e) => setContextFiles((prev) => prev.map((x) => (x.id === cf.id ? { ...x, includeInPrompt: e.target.checked } : x)))}
+                      />
+                      Include text in AI prompt
+                    </label>
+                    <label style={{ display: "flex", alignItems: "center", gap: 6, color: "#94A3B8", cursor: "pointer" }}>
+                      <input
+                        type="checkbox"
+                        checked={cf.attachToJira}
+                        onChange={(e) => setContextFiles((prev) => prev.map((x) => (x.id === cf.id ? { ...x, attachToJira: e.target.checked } : x)))}
+                      />
+                      Attach original file to JIRA when creating issue
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => setContextFiles((prev) => prev.filter((x) => x.id !== cf.id))}
+                      style={{ marginTop: 8, background: "none", border: "1px solid #EF444433", borderRadius: 6, padding: "4px 8px", color: "#f87171", fontSize: 10, cursor: "pointer" }}
+                    >
+                      Remove
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
 
           <div style={{ marginTop: 12 }}>
@@ -921,62 +1506,80 @@ export default function JiraAgent() {
             Also propose sub-JIRAs ( decomposition after main ticket )
           </label>
 
-          <div style={{ display: "flex", gap: 10, marginTop: 16, flexWrap: "wrap" }}>
-            {phase === "input" && (
-              <button
-                type="button"
-                onClick={handleClarify}
-                disabled={loading}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 8,
-                  background: "linear-gradient(135deg,#0EA5E9,#3B82F6)",
-                  border: "none",
-                  borderRadius: 10,
-                  padding: "10px 20px",
-                  color: "#fff",
-                  fontSize: 13,
-                  fontWeight: 700,
-                  cursor: loading ? "wait" : "pointer",
-                }}
-              >
-                {loading && <Spinner color="#fff" />}
-                Next: clarify &amp; set objective
-              </button>
-            )}
-            {(phase === "clarify" || phase === "done") && (
+          {resultMd && (
+            <div style={{ marginTop: 14, padding: 12, background: "#0f172a", border: "1px solid #334155", borderRadius: 8, fontSize: 12, color: "#94a3b8" }}>
+              A draft already exists. Regenerate from current inputs (you’ll return to the result screen after).
               <button
                 type="button"
                 onClick={handleGenerate}
                 disabled={loading}
                 style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 8,
-                  background: "linear-gradient(135deg,#F59E0B,#EA580C)",
+                  marginLeft: 10,
+                  background: "#F59E0B",
                   border: "none",
-                  borderRadius: 10,
-                  padding: "10px 20px",
+                  borderRadius: 8,
+                  padding: "6px 12px",
                   color: "#0B1120",
-                  fontSize: 13,
+                  fontSize: 11,
                   fontWeight: 700,
                   cursor: loading ? "wait" : "pointer",
                 }}
               >
-                {loading && <Spinner />}
-                Regenerate / generate ticket
+                Regenerate draft
               </button>
-            )}
-            <button type="button" onClick={resetSession} style={{ background: "#111827", border: "1px solid #334155", borderRadius: 8, padding: "10px 16px", color: "#94A3B8", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
-              New session
-            </button>
-          </div>
-          {statusMsg && (
-            <div style={{ marginTop: 12, fontSize: 12, color: statusMsg.startsWith("Error") ? "#FC8999" : "#7DD3FC", lineHeight: 1.5 }}>
-              {statusMsg}
             </div>
           )}
+
+          <div style={{ display: "flex", gap: 10, marginTop: 16, flexWrap: "wrap" }}>
+            {phase === "input" && (
+              <>
+                <button
+                  type="button"
+                  onClick={handleClarify}
+                  disabled={loading}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    background: "linear-gradient(135deg,#0EA5E9,#3B82F6)",
+                    border: "none",
+                    borderRadius: 10,
+                    padding: "10px 20px",
+                    color: "#fff",
+                    fontSize: 13,
+                    fontWeight: 700,
+                    cursor: loading ? "wait" : "pointer",
+                  }}
+                >
+                  {loading && <Spinner color="#fff" />}
+                  Next: clarify &amp; set objective
+                </button>
+                <button
+                  type="button"
+                  onClick={handleGenerate}
+                  disabled={loading}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    background: "#111827",
+                    border: "1px solid #334155",
+                    borderRadius: 10,
+                    padding: "10px 16px",
+                    color: "#93C5FD",
+                    fontSize: 12,
+                    fontWeight: 600,
+                    cursor: loading ? "wait" : "pointer",
+                  }}
+                >
+                  Skip clarify — generate now
+                </button>
+              </>
+            )}
+            <button type="button" onClick={resetSession} style={{ background: "#111827", border: "1px solid #334155", borderRadius: 8, padding: "10px 16px", color: "#94A3B8", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
+              Reset this screen
+            </button>
+          </div>
         </div>
 
         {phase === "clarify" && (
@@ -1000,100 +1603,34 @@ export default function JiraAgent() {
               placeholder="Answers (optional)"
               style={{ width: "100%", background: "#0B1220", border: "1px solid #1E293B", borderRadius: 8, color: "#E2E8F0", padding: "10px 12px", fontSize: 12 }}
             />
+            <button
+              type="button"
+              onClick={handleGenerate}
+              disabled={loading}
+              style={{
+                marginTop: 14,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: 8,
+                width: "100%",
+                background: "linear-gradient(135deg,#F59E0B,#EA580C)",
+                border: "none",
+                borderRadius: 10,
+                padding: "12px 20px",
+                color: "#0B1120",
+                fontSize: 14,
+                fontWeight: 800,
+                cursor: loading ? "wait" : "pointer",
+              }}
+            >
+              {loading && <Spinner />}
+              Generate JIRA ticket
+            </button>
           </div>
         )}
-
-        {phase === "done" && resultMd && (
-          <>
-            <div style={{ background: "#0A1120", border: "1px solid #1E3A5F", borderRadius: 14, padding: "28px 32px", marginBottom: 20 }}>
-              <div style={{ borderBottom: "2px solid #1E3A5F", paddingBottom: 16, marginBottom: 20 }}>
-                <div style={{ fontSize: 11, color: "#38BDF8", fontWeight: 700, letterSpacing: 2, textTransform: "uppercase", marginBottom: 8 }}>JIRA ticket draft</div>
-                <div style={{ fontSize: 22, fontWeight: 700, color: "#F1F5F9" }}>{displayTitle}</div>
-                <div style={{ fontSize: 12, color: "#475569", marginTop: 6 }}>{projectKey ? `${projectKey} · ` : ""}{issueType}</div>
-              </div>
-              <div style={{ lineHeight: 1.75 }}>{renderJiraMarkdown(resultMd)}</div>
-            </div>
-
-            {subtasks.length > 0 && (
-              <div style={{ background: "#0D1626", border: "1px solid #1E293B", borderRadius: 14, padding: 24, marginBottom: 20 }}>
-                <div style={{ fontSize: 14, fontWeight: 700, color: "#A78BFA", marginBottom: 12 }}>Proposed sub-JIRAs ({subtasks.length})</div>
-                <p style={{ fontSize: 12, color: "#64748b", marginBottom: 14 }}>
-                  These are drafts. Use <strong style={{ color: "#E2E8F0" }}>Create parent + sub-JIRAs</strong> to push all at once (requires a sub-task type on your JIRA project — configure{" "}
-                  <code style={{ background: "#111827", padding: "2px 6px", borderRadius: 4 }}>JIRA_SUBTASK_ISSUE_TYPE_NAME</code> or{" "}
-                  <code style={{ background: "#111827", padding: "2px 6px", borderRadius: 4 }}>JIRA_SUBTASK_ISSUE_TYPE_ID</code> in <code style={{ background: "#111827", padding: "2px 6px", borderRadius: 4 }}>.env</code> if not default).
-                </p>
-                {subtasks.map((s, i) => (
-                  <div key={i} style={{ border: "1px solid #1E293B", borderRadius: 10, padding: 14, marginBottom: 10, background: "#0B1220" }}>
-                    <div style={{ fontSize: 13, fontWeight: 700, color: "#E2E8F0", marginBottom: 8 }}>{s.summary || `Subtask ${i + 1}`}</div>
-                    <div style={{ fontSize: 12, color: "#94A3B8" }}>{(s.description || "").slice(0, 400)}{(s.description || "").length > 400 ? "…" : ""}</div>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginBottom: 20 }}>
-              <button
-                type="button"
-                onClick={() => navigator.clipboard.writeText(resultMd)}
-                style={{ background: "linear-gradient(135deg,#1D4ED8,#2563EB)", border: "none", borderRadius: 9, padding: "10px 18px", color: "#fff", fontSize: 12, fontWeight: 700, cursor: "pointer" }}
-              >
-                📋 Copy markdown
-              </button>
-              <button
-                type="button"
-                onClick={handleCreateJira}
-                disabled={creating}
-                style={{ background: "#0052CC", border: "none", borderRadius: 9, padding: "10px 18px", color: "#fff", fontSize: 12, fontWeight: 700, cursor: creating ? "wait" : "pointer" }}
-              >
-                {creating ? "Creating…" : "Create JIRA (parent only)"}
-              </button>
-              <button
-                type="button"
-                onClick={handleCreateWithSubtasks}
-                disabled={creating || !subtasks.length}
-                style={{
-                  background: subtasks.length ? "#7C3AED" : "#334155",
-                  border: "none",
-                  borderRadius: 9,
-                  padding: "10px 18px",
-                  color: "#fff",
-                  fontSize: 12,
-                  fontWeight: 700,
-                  cursor: creating || !subtasks.length ? "not-allowed" : "pointer",
-                }}
-              >
-                Create parent + sub-JIRAs
-              </button>
-              {createdBundle?.parentBrowseUrl && (
-                <a href={createdBundle.parentBrowseUrl} target="_blank" rel="noreferrer" style={{ alignSelf: "center", color: "#7DD3FC", fontSize: 13, fontWeight: 600 }}>
-                  Open {createdBundle.parentKey}
-                </a>
-              )}
-            </div>
-
-            <div style={{ background: "#0D1626", border: "1px solid #1E293B", borderRadius: 14, padding: 24, marginBottom: 20 }}>
-              <div style={{ fontSize: 13, fontWeight: 700, color: "#F1F5F9", marginBottom: 10 }}>Improve this ticket</div>
-              <textarea
-                value={feedback}
-                onChange={(e) => setFeedback(e.target.value)}
-                rows={4}
-                placeholder="Feedback for the next revision"
-                style={{ width: "100%", background: "#0B1220", border: "1px solid #1E293B", borderRadius: 8, color: "#E2E8F0", padding: "10px 12px", fontSize: 12 }}
-              />
-              <button
-                type="button"
-                onClick={handleImprove}
-                disabled={loading || !feedback.trim()}
-                style={{ marginTop: 10, background: "linear-gradient(135deg,#A78BFA,#6366F1)", border: "none", borderRadius: 8, padding: "8px 16px", color: "#fff", fontSize: 12, fontWeight: 600, cursor: "pointer" }}
-              >
-                {loading ? "Improving…" : "Apply feedback"}
-              </button>
-            </div>
-
-            <ShareAndScore docType="jira" title={displayTitle} content={resultMd} jiraKey={derivedJiraKey} autoPublish={[]} />
-          </>
-        )}
       </div>
+      )}
 
       {showHistory && (
         <HistoryPanel history={history} onLoad={loadFromHistory} onDelete={deleteHistory} onClear={clearHistory} onClose={() => setShowHistory(false)} />

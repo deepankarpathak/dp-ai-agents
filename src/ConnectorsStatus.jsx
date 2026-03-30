@@ -2,17 +2,29 @@ import { useState, useEffect, useCallback } from "react";
 import { API_BASE } from "./config.js";
 
 const PUBLISH_DEFAULTS_KEY = "publish-defaults-v1";
+const PUBLISH_DEFAULTS_EMPTY = {
+  jiraKey: "",
+  telegramChatId: "",
+  emailTo: "",
+  /** Short JIRA project key for JIRA Agent default (e.g. TSP). */
+  jiraDefaultProjectKey: "",
+  /** Email, display name, or Atlassian accountId — sent as Dev Assignee on create. */
+  jiraDevAssignee: "",
+  /** auto | primary | secondary — default Atlassian site for fetch / create / Share when the issue key has no URL. */
+  jiraWriteSite: "auto",
+};
 function loadPublishDefaults() {
   try {
     const raw = localStorage.getItem(PUBLISH_DEFAULTS_KEY);
-    return raw ? JSON.parse(raw) : { jiraKey: "", telegramChatId: "", emailTo: "" };
+    return raw ? { ...PUBLISH_DEFAULTS_EMPTY, ...JSON.parse(raw) } : { ...PUBLISH_DEFAULTS_EMPTY };
   } catch {
-    return { jiraKey: "", telegramChatId: "", emailTo: "" };
+    return { ...PUBLISH_DEFAULTS_EMPTY };
   }
 }
 function savePublishDefaults(d) {
   try {
     localStorage.setItem(PUBLISH_DEFAULTS_KEY, JSON.stringify(d));
+    window.dispatchEvent(new CustomEvent("publish-defaults-changed", { detail: d }));
   } catch {}
 }
 
@@ -27,7 +39,15 @@ export function syncPublishDefaultJiraKey(keyOrText) {
   savePublishDefaults({ ...cur, jiraKey: key });
 }
 
-export { loadPublishDefaults, savePublishDefaults, PUBLISH_DEFAULTS_KEY };
+/** After JIRA fetch — remember which site the issue lives on for Share / creates. */
+export function syncPublishJiraSiteFromIssue(d) {
+  if (!d?.jiraSite) return;
+  if (d.jiraSite !== "secondary" && d.jiraSite !== "primary") return;
+  const cur = loadPublishDefaults();
+  savePublishDefaults({ ...cur, jiraWriteSite: d.jiraSite });
+}
+
+export { loadPublishDefaults, savePublishDefaults, PUBLISH_DEFAULTS_KEY, PUBLISH_DEFAULTS_EMPTY };
 
 const CONNECTOR_LIST = [
   { id: "jira", label: "JIRA", icon: "J", color: "#0052CC", envHint: "JIRA_URL, JIRA_EMAIL, JIRA_TOKEN" },
@@ -60,15 +80,14 @@ export default function ConnectorsStatus() {
     try {
       const r = await fetch(`${API_BASE}/api/jira-test`);
       const d = await r.json();
-      if (d.ok) setJiraTestResult(`Connected as ${d.user}`);
+      if (d.ok && Array.isArray(d.sites) && d.sites.length) {
+        const lines = d.sites.map((s) => `${s.label || s.id}: ${s.ok ? `✓ ${s.user || "OK"}` : `✗ ${s.error || "fail"}`}`);
+        setJiraTestResult(lines.join("\n"));
+      } else if (d.ok) setJiraTestResult(`Connected as ${d.user}`);
       else setJiraTestResult(d.error || "Connection failed");
     } catch (e) { setJiraTestResult("Server error: " + e.message); }
     setJiraTestLoading(false);
   };
-
-  const connectedCount = CONNECTOR_LIST.filter((c) => status[c.id]).length;
-  const totalCount = CONNECTOR_LIST.length;
-  const connectorNames = CONNECTOR_LIST.map((c) => c.label).join(" · ");
 
   return (
     <>
@@ -104,7 +123,7 @@ export default function ConnectorsStatus() {
           <div style={{ position: "fixed", top: "50%", left: "50%", transform: "translate(-50%,-50%)", width: 520, maxHeight: "80vh", overflow: "auto", background: "#0f172a", border: "1px solid #1e293b", borderRadius: 16, zIndex: 9999, padding: 28, fontFamily: "'Segoe UI', sans-serif", color: "#e2e8f0" }}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20 }}>
               <div style={{ fontSize: 16, fontWeight: 700 }}>Connector Settings</div>
-              <button onClick={() => setOpen(false)} style={{ background: "#1e293b", border: "none", borderRadius: 8, width: 30, height: 30, color: "#94a3b8", fontSize: 18, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>x</button>
+              <button type="button" onClick={() => setOpen(false)} style={{ background: "#1e293b", border: "none", borderRadius: 8, width: 30, height: 30, color: "#94a3b8", fontSize: 18, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>x</button>
             </div>
             <div style={{ fontSize: 12, color: "#64748b", marginBottom: 20, lineHeight: 1.6 }}>
               Connectors are configured via environment variables in your <code style={{ background: "#1e293b", padding: "2px 6px", borderRadius: 4, color: "#93c5fd" }}>.env</code> file. Restart the server after making changes.
@@ -126,7 +145,7 @@ export default function ConnectorsStatus() {
                 </div>
                 {id === "jira" && (
                   <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 8 }}>
-                    <button onClick={testJira} disabled={jiraTestLoading || !status.jira} style={{ background: status.jira ? "#0052CC22" : "#1e293b", border: `1px solid ${status.jira ? "#0052CC66" : "#334155"}`, borderRadius: 8, padding: "6px 14px", color: status.jira ? "#0052CC" : "#64748b", fontSize: 11, fontWeight: 600, cursor: status.jira && !jiraTestLoading ? "pointer" : "not-allowed", fontFamily: "inherit" }}>
+                    <button type="button" onClick={testJira} disabled={jiraTestLoading || !status.jira} style={{ background: status.jira ? "#0052CC22" : "#1e293b", border: `1px solid ${status.jira ? "#0052CC66" : "#334155"}`, borderRadius: 8, padding: "6px 14px", color: status.jira ? "#0052CC" : "#64748b", fontSize: 11, fontWeight: 600, cursor: status.jira && !jiraTestLoading ? "pointer" : "not-allowed", fontFamily: "inherit" }}>
                       {jiraTestLoading ? "Testing..." : "Test Connection"}
                     </button>
                     {jiraTestResult && (
@@ -143,8 +162,16 @@ export default function ConnectorsStatus() {
               <div style={{ fontSize: 12, fontWeight: 600, color: "#f59e0b", marginBottom: 6 }}>Example .env configuration</div>
               <pre style={{ fontSize: 11, color: "#94a3b8", margin: 0, lineHeight: 1.8, fontFamily: "monospace", whiteSpace: "pre-wrap" }}>{`# JIRA
 JIRA_URL=https://yourcompany.atlassian.net
+# Second site (TPAP / mypaytm) — same email & token
+# JIRA_URL_2=https://mypaytm.atlassian.net
+# Projects that live on JIRA_URL_2 (comma-separated):
+# JIRA_SECONDARY_PROJECT_KEYS=TPAP,PCO,TPG
 JIRA_EMAIL=you@company.com
 JIRA_TOKEN=ATATT3x...
+# Optional — Dev Assignee custom field on create (see .env.example)
+# JIRA_DEV_ASSIGNEE_FIELD_ID=customfield_10236
+# JIRA_DEV_ASSIGNEE=you@company.com
+# JIRA_DEV_ASSIGNEE_SINGLE_USER_OBJECT=true   # only if your field is single-user, not multi-user
 
 # Slack
 SLACK_WEBHOOK_URL=https://hooks.slack.com/services/...
@@ -172,6 +199,39 @@ TELEGRAM_BOT_TOKEN=123456789:ABCdefGHI...`}</pre>
                     placeholder="e.g. TSP-1889"
                     value={publishDefaults.jiraKey}
                     onChange={(e) => setPublishDefaults((p) => ({ ...p, jiraKey: e.target.value }))}
+                    style={{ width: "100%", background: "#0f172a", border: "1px solid #334155", borderRadius: 6, padding: "6px 10px", color: "#e2e8f0", fontSize: 12 }}
+                  />
+                </div>
+                <div>
+                  <label style={{ fontSize: 10, color: "#94a3b8", display: "block", marginBottom: 4 }}>Default JIRA site (fetch / Share / agents)</label>
+                  <select
+                    value={["auto", "primary", "secondary"].includes(publishDefaults.jiraWriteSite) ? publishDefaults.jiraWriteSite : "auto"}
+                    onChange={(e) => setPublishDefaults((p) => ({ ...p, jiraWriteSite: e.target.value }))}
+                    style={{ width: "100%", background: "#0f172a", border: "1px solid #334155", borderRadius: 6, padding: "6px 10px", color: "#e2e8f0", fontSize: 12 }}
+                  >
+                    <option value="auto">Auto — use project key (TPAP, PCO, TPG → JIRA_URL_2) or try primary first on fetch</option>
+                    <option value="primary">Always primary (JIRA_URL)</option>
+                    <option value="secondary">Always secondary (JIRA_URL_2)</option>
+                  </select>
+                  <div style={{ fontSize: 10, color: "#64748b", marginTop: 4 }}>Paste a full browse URL anytime — the correct site is detected from the link.</div>
+                </div>
+                <div>
+                  <label style={{ fontSize: 10, color: "#94a3b8", display: "block", marginBottom: 4 }}>JIRA Agent — default project key</label>
+                  <input
+                    type="text"
+                    placeholder="e.g. TSP (not the full project name)"
+                    value={publishDefaults.jiraDefaultProjectKey || ""}
+                    onChange={(e) => setPublishDefaults((p) => ({ ...p, jiraDefaultProjectKey: e.target.value }))}
+                    style={{ width: "100%", background: "#0f172a", border: "1px solid #334155", borderRadius: 6, padding: "6px 10px", color: "#e2e8f0", fontSize: 12 }}
+                  />
+                </div>
+                <div>
+                  <label style={{ fontSize: 10, color: "#94a3b8", display: "block", marginBottom: 4 }}>JIRA Agent — Dev assignee on create</label>
+                  <input
+                    type="text"
+                    placeholder="Email, name, or Atlassian accountId (UUID)"
+                    value={publishDefaults.jiraDevAssignee || ""}
+                    onChange={(e) => setPublishDefaults((p) => ({ ...p, jiraDevAssignee: e.target.value }))}
                     style={{ width: "100%", background: "#0f172a", border: "1px solid #334155", borderRadius: 6, padding: "6px 10px", color: "#e2e8f0", fontSize: 12 }}
                   />
                 </div>

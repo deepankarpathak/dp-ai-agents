@@ -32,8 +32,9 @@ const btnStyle = (primary = false) => ({
  * @param {string} props.content - Full markdown
  * @param {string} [props.jiraKey] - e.g. TSP-1889 for email subject pattern
  * @param {string[]} [props.autoPublish]
+ * @param {'auto'|'primary'|'secondary'} [props.jiraShareSite] — overrides Connectors default for JIRA comment POST
  */
-export default function ShareAndScore({ docType, title, content, jiraKey = "", autoPublish = [] }) {
+export default function ShareAndScore({ docType, title, content, jiraKey = "", autoPublish = [], jiraShareSite }) {
   const [shareStatus, setShareStatus] = useState({ type: "", ok: false, msg: "" });
   const [score, setScore] = useState(null);
   const [scoreLoading, setScoreLoading] = useState(false);
@@ -72,7 +73,12 @@ export default function ShareAndScore({ docType, title, content, jiraKey = "", a
     (async () => {
       for (const t of toRun) {
         try {
-          if (t === "jira") await apiJson("/api/share/jira", { issueKey: defs.jiraKey, text: content, title });
+          if (t === "jira") {
+            const site = jiraShareSite ?? defs.jiraWriteSite;
+            const body = { issueKey: defs.jiraKey, text: content, title };
+            if (site && site !== "auto") body.jiraSite = site;
+            await apiJson("/api/share/jira", body);
+          }
           else if (t === "telegram") await apiJson("/api/share/telegram", { chatId: defs.telegramChatId, text: content, title });
           else if (t === "email") await apiJson("/api/share/email", { to: defs.emailTo, subject: shareSubject, text: content, title });
           else if (t === "slack") await apiJson("/api/share/slack", { text: content, title });
@@ -81,7 +87,7 @@ export default function ShareAndScore({ docType, title, content, jiraKey = "", a
       setPublishRunning(false);
       setPublishDone(true);
     })();
-  }, [content, autoPublish, docType, title, shareSubject]);
+  }, [content, autoPublish, docType, title, shareSubject, jiraShareSite]);
 
   async function apiJson(path, body) {
     const primary = `${API_BASE}${path}`;
@@ -134,7 +140,10 @@ export default function ShareAndScore({ docType, title, content, jiraKey = "", a
     if (!defs.jiraKey?.trim()) { setShareStatus({ type: "jira", ok: false, msg: "Set default JIRA issue key in Connectors (top bar)" }); return; }
     setShareStatus({ type: "", msg: "" });
     try {
-      const { data: d } = await apiJson("/api/share/jira", { issueKey: defs.jiraKey.trim(), text: content, title });
+      const site = jiraShareSite ?? defs.jiraWriteSite;
+      const body = { issueKey: defs.jiraKey.trim(), text: content, title };
+      if (site && site !== "auto") body.jiraSite = site;
+      const { data: d } = await apiJson("/api/share/jira", body);
       if (d.success) setShareStatus({ type: "jira", ok: true, msg: "Posted to JIRA" });
       else setShareStatus({ type: "jira", ok: false, msg: d.error || "Failed" });
     } catch (e) { setShareStatus({ type: "jira", ok: false, msg: e.message }); }
@@ -178,7 +187,10 @@ export default function ShareAndScore({ docType, title, content, jiraKey = "", a
     const results = [];
     if (publishSelected.jira && defs.jiraKey) {
       try {
-        const { data: d } = await apiJson("/api/share/jira", { issueKey: defs.jiraKey.trim(), text: content, title });
+        const site = jiraShareSite ?? defs.jiraWriteSite;
+        const jb = { issueKey: defs.jiraKey.trim(), text: content, title };
+        if (site && site !== "auto") jb.jiraSite = site;
+        const { data: d } = await apiJson("/api/share/jira", jb);
         results.push(d.success ? "JIRA ✓" : "JIRA: " + (d.error || "Failed"));
       } catch (e) { results.push("JIRA: " + e.message); }
     } else if (publishSelected.jira) results.push("JIRA: Set default in Connectors");

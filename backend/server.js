@@ -9,7 +9,8 @@ import { fileURLToPath } from "url";
 import multer from "multer";
 import mammoth from "mammoth";
 import { Document, Packer, Paragraph, HeadingLevel } from "docx";
-import { extractTextFromPDF } from "./pdfParser.js";
+import { extractTextFromPDF, extractTextFromPDFBuffer } from "./pdfParser.js";
+import FormData from "form-data";
 import { retrieve as ragRetrieve } from "./rag/retrieve.js";
 import {
   markdownToEmailHtml,
@@ -70,8 +71,169 @@ const LLM_MODEL = process.env.LLM_MODEL;
 const LLM_API_KEY = process.env.LLM_KEY_API || process.env.LLM_API_KEY;
 
 const JIRA_URL = (process.env.JIRA_URL || "").replace(/\/$/, "");
+/** Second Atlassian site (e.g. TPAP on mypaytm). Same JIRA_EMAIL / JIRA_TOKEN as primary unless you add overrides later. */
+const JIRA_URL_2 = (process.env.JIRA_URL_2 || process.env.JIRA_URL_SECONDARY || process.env.JIRA_URL_TPAP || "").replace(/\/$/, "");
 const JIRA_EMAIL = process.env.JIRA_EMAIL || "";
 const JIRA_TOKEN = process.env.JIRA_TOKEN || process.env.JIRA_API_TOKEN || "";
+/** Project keys that live on JIRA_URL_2 (comma-separated). Used when creating/fetching by key only. */
+const JIRA_SECONDARY_PROJECT_KEYS = new Set(
+  String(process.env.JIRA_SECONDARY_PROJECT_KEYS || "TPAP,PCO,TPG")
+    .split(/[,\s]+/)
+    .map((s) => s.trim().toUpperCase())
+    .filter(Boolean)
+);
+
+function jiraAuthHeader() {
+  return "Basic " + Buffer.from(`${JIRA_EMAIL}:${JIRA_TOKEN}`).toString("base64");
+}
+
+function normalizeJiraBaseUrl(u) {
+  return String(u || "")
+    .trim()
+    .replace(/\/$/, "");
+}
+
+function listConfiguredJiraBases() {
+  const out = [];
+  if (JIRA_URL) {
+    out.push({
+      id: "primary",
+      base: JIRA_URL,
+      label: process.env.JIRA_SITE_LABEL_PRIMARY || "Primary (finmate)",
+    });
+  }
+  if (JIRA_URL_2) {
+    out.push({
+      id: "secondary",
+      base: JIRA_URL_2,
+      label: process.env.JIRA_SITE_LABEL_SECONDARY || "TPAP (mypaytm)",
+    });
+  }
+  return out;
+}
+
+function safeDecodeURIComponent(s) {
+  try {
+    return decodeURIComponent(s);
+  } catch {
+    return s;
+  }
+}
+
+/** Extract issue key + optional Atlassian host from pasted URL or plain key. */
+function parseJiraIssueRequestParam(rawParam) {
+  const s = safeDecodeURIComponent(String(rawParam || "").trim());
+  let explicitBase = null;
+  let issueKey = "";
+
+  const selectedM = s.match(/[?&]selectedIssue=([A-Z][A-Z0-9]+-\d+)/i);
+  if (selectedM) {
+    issueKey = selectedM[1].toUpperCase();
+    const hostM = s.match(/https?:\/\/([a-z0-9.-]+\.atlassian\.net)/i);
+    if (hostM) explicitBase = normalizeJiraBaseUrl(`https://${hostM[1]}`);
+    return { issueKey, explicitBase };
+  }
+
+  const hostKeyM = s.match(/https?:\/\/([a-z0-9.-]+\.atlassian\.net).*?([A-Z][A-Z0-9]+-\d+)/i);
+  if (hostKeyM) {
+    explicitBase = normalizeJiraBaseUrl(`https://${hostKeyM[1]}`);
+    issueKey = hostKeyM[2].toUpperCase();
+    return { issueKey, explicitBase };
+  }
+
+  const keyOnly = s.match(/\b([A-Z][A-Z0-9]+-\d+)\b/i);
+  if (keyOnly) {
+    issueKey = keyOnly[1].toUpperCase();
+    return { issueKey, explicitBase: null };
+  }
+
+  const upper = s.toUpperCase().replace(/[^A-Z0-9-]/g, "");
+  if (/^[A-Z][A-Z0-9]+-\d+$/.test(upper)) return { issueKey: upper, explicitBase: null };
+  return { issueKey: "", explicitBase: null };
+}
+
+function resolveBasesForFetch(parsed, query) {
+  const configured = listConfiguredJiraBases()
+    .map((x) => x.base)
+    .filter(Boolean);
+  let site = String(query?.site || "").toLowerCase();
+  if (!site || site === "auto") site = "";
+
+  if (parsed.explicitBase) {
+    const ex = normalizeJiraBaseUrl(parsed.explicitBase);
+    const ordered = [ex];
+    for (const b of configured) {
+      if (b !== ex) ordered.push(b);
+    }
+    return [...new Set(ordered.filter(Boolean))];
+  }
+
+  let ordered;
+  if (site === "secondary" && JIRA_URL_2) {
+    ordered = [JIRA_URL_2, JIRA_URL].filter(Boolean);
+  } else if (site === "primary" && JIRA_URL) {
+    ordered = [JIRA_URL, JIRA_URL_2].filter(Boolean);
+  } else {
+    ordered = [JIRA_URL, JIRA_URL_2].filter(Boolean);
+  }
+  ordered = [...new Set(ordered.filter(Boolean))];
+
+  const qBase = normalizeJiraBaseUrl(query?.jiraBase || query?.jiraBaseUrl || "");
+  if (qBase && configured.includes(qBase)) {
+    return [qBase, ...ordered.filter((b) => b !== qBase)];
+  }
+  return ordered.length ? ordered : configured;
+}
+
+/**
+ * Base URL for create / comments / attachments.
+ * body: { jiraSite?: 'primary'|'secondary', jiraBaseUrl?: string }
+ */
+function resolveJiraBaseForWrite(projectKey, body) {
+  const pk = String(projectKey || "")
+    .trim()
+    .toUpperCase()
+    .split(/-/)[0];
+  const explicit = normalizeJiraBaseUrl(body?.jiraBaseUrl || body?.jiraBase || "");
+  const configured = listConfiguredJiraBases().map((x) => x.base).filter(Boolean);
+  if (explicit) {
+    if (configured.includes(explicit)) return explicit;
+    if (/^https:\/\/[a-z0-9.-]+\.atlassian\.net$/i.test(explicit)) {
+      console.warn("[jira-write] using explicit jiraBaseUrl not listed in JIRA_URL / JIRA_URL_2:", explicit);
+      return explicit;
+    }
+    throw new Error(`Invalid jiraBaseUrl. Use a configured site base or *.atlassian.net URL.`);
+  }
+  const site = String(body?.jiraSite || "").toLowerCase();
+  if (site === "secondary") return JIRA_URL_2 || JIRA_URL;
+  if (site === "primary") return JIRA_URL || JIRA_URL_2;
+  // auto / empty / unknown
+  if (pk && JIRA_SECONDARY_PROJECT_KEYS.has(pk)) return JIRA_URL_2 || JIRA_URL;
+  return JIRA_URL || JIRA_URL_2;
+}
+
+function resolveJiraBaseFromIssueKey(issueKey, body) {
+  const project = String(issueKey || "")
+    .trim()
+    .toUpperCase()
+    .split(/-/)[0];
+  return resolveJiraBaseForWrite(project, body || {});
+}
+
+/** User-picker custom field id for "Dev Assignee" (or set JIRA_DEV_ASSIGNEE_FIELD_ID= in .env to override). */
+const JIRA_DEV_ASSIGNEE_FIELD_ID = String(process.env.JIRA_DEV_ASSIGNEE_FIELD_ID || "customfield_10236").trim();
+/**
+ * Multi-user picker fields expect an array: [{ id }]. Single-user picker: one object { id }.
+ * @see https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issues/#api-rest-api-3-issue-post
+ */
+const JIRA_DEV_ASSIGNEE_SINGLE_USER_OBJECT =
+  String(process.env.JIRA_DEV_ASSIGNEE_SINGLE_USER_OBJECT || "").toLowerCase() === "true";
+
+if (JIRA_DEV_ASSIGNEE_SINGLE_USER_OBJECT) {
+  console.warn(
+    "[jira] JIRA_DEV_ASSIGNEE_SINGLE_USER_OBJECT=true — Dev Assignee is sent as a single object. If JIRA returns \"data was not an array\", remove this line from .env (multi-user fields need [{ id }])."
+  );
+}
 
 function extractJiraText(doc) {
   if (!doc) return "";
@@ -197,10 +359,14 @@ app.post("/api/claude", async (req, res) => {
 });
 
 app.get("/api/config", (req, res) => {
+  const sites = listConfiguredJiraBases();
   res.json({
     anthropicConfigured: !!LLM_API_KEY,
-    jiraConfigured: !!(JIRA_URL && JIRA_EMAIL && JIRA_TOKEN),
+    jiraConfigured: !!(JIRA_EMAIL && JIRA_TOKEN && sites.length > 0),
     jiraUrl: JIRA_URL || "",
+    jiraUrl2: JIRA_URL_2 || "",
+    jiraSites: sites,
+    jiraSecondaryProjectKeys: [...JIRA_SECONDARY_PROJECT_KEYS],
     jiraEmail: JIRA_EMAIL || "",
   });
 });
@@ -266,9 +432,49 @@ app.post("/api/extract-docx", upload.single("file"), async (req, res) => {
   }
 });
 
+app.post("/api/extract-context-file", upload.single("file"), async (req, res) => {
+  try {
+    if (!req.file?.buffer) {
+      return res.status(400).json({ success: false, error: "Missing file" });
+    }
+    const ext = path.extname(req.file.originalname || "").toLowerCase();
+    const name = req.file.originalname || "file";
+    let text = "";
+    if (ext === ".docx") {
+      const result = await mammoth.extractRawText({ buffer: req.file.buffer });
+      text = result.value || "";
+    } else if (ext === ".pdf") {
+      text = await extractTextFromPDFBuffer(req.file.buffer);
+    } else if (ext === ".xlsx" || ext === ".xls") {
+      const XLSX = await import("xlsx");
+      const wb = XLSX.read(req.file.buffer, { type: "buffer" });
+      const parts = [];
+      for (const sn of wb.SheetNames || []) {
+        const sheet = wb.Sheets[sn];
+        if (sheet) parts.push(`--- Sheet: ${sn} ---\n${XLSX.utils.sheet_to_csv(sheet)}`);
+      }
+      text = parts.join("\n\n");
+    } else if (ext === ".txt" || ext === ".csv" || ext === ".md") {
+      text = req.file.buffer.toString("utf8");
+    } else {
+      return res.status(400).json({
+        success: false,
+        error: "Unsupported file type. Use .docx, .pdf, .xlsx, .xls, .txt, .csv, or .md",
+      });
+    }
+    res.json({ success: true, text: String(text).slice(0, 200000), name });
+  } catch (err) {
+    console.error("extract-context-file:", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 app.get("/api/connectors/status", (req, res) => {
+  const sites = listConfiguredJiraBases();
   res.json({
-    jira: !!(JIRA_URL && JIRA_EMAIL && JIRA_TOKEN),
+    jira: !!(JIRA_EMAIL && JIRA_TOKEN && sites.length > 0),
+    jiraSites: sites,
+    jiraSecondaryProjectKeys: [...JIRA_SECONDARY_PROJECT_KEYS],
     slack: !!(process.env.SLACK_BOT_TOKEN || process.env.SLACK_WEBHOOK_URL),
     whatsapp: !!(process.env.WHATSAPP_TOKEN || process.env.WHATSAPP_PHONE_ID),
     email: !!(process.env.EMAIL_SMTP_HOST || process.env.EMAIL_API_KEY),
@@ -277,68 +483,284 @@ app.get("/api/connectors/status", (req, res) => {
 });
 
 app.get("/api/jira-test", async (req, res) => {
-  if (!JIRA_URL || !JIRA_EMAIL || !JIRA_TOKEN) {
+  const sites = listConfiguredJiraBases();
+  if (!sites.length || !JIRA_EMAIL || !JIRA_TOKEN) {
     return res.status(400).json({ ok: false, error: "JIRA not configured. Set JIRA_URL, JIRA_EMAIL, JIRA_TOKEN in .env" });
   }
   try {
-    const r = await fetch(`${JIRA_URL}/rest/api/3/myself`, {
-      headers: {
-        Authorization: "Basic " + Buffer.from(`${JIRA_EMAIL}:${JIRA_TOKEN}`).toString("base64"),
-        Accept: "application/json",
-      },
+    const results = [];
+    for (const s of sites) {
+      const url = `${s.base}/rest/api/3/myself`;
+      const r = await fetch(url, {
+        headers: { Authorization: jiraAuthHeader(), Accept: "application/json" },
+      });
+      const data = await r.json().catch(() => ({}));
+      const label = s.label || s.id;
+      if (r.ok) {
+        const u = data?.displayName || data?.emailAddress || "OK";
+        console.log(`[jira-test] OK ${label} (${s.base}) as ${u}`);
+        results.push({ id: s.id, base: s.base, label, ok: true, user: u });
+      } else {
+        const msg = Array.isArray(data?.errorMessages) ? data.errorMessages.join("; ") : `HTTP ${r.status}`;
+        console.error(`[jira-test] FAIL ${label} (${s.base}):`, msg);
+        results.push({ id: s.id, base: s.base, label, ok: false, error: msg });
+      }
+    }
+    const firstOk = results.find((x) => x.ok);
+    return res.json({
+      ok: results.some((x) => x.ok),
+      user: firstOk?.user,
+      sites: results,
     });
-    const d = r.ok ? await r.json() : null;
-    if (r.ok) return res.json({ ok: true, user: d?.displayName || d?.emailAddress });
-    return res.status(r.status).json({ ok: false, error: `JIRA auth failed: ${r.status}` });
   } catch (err) {
     return res.status(500).json({ ok: false, error: err.message });
   }
 });
 
+function jiraSiteLabelForBase(base) {
+  const b = normalizeJiraBaseUrl(base);
+  if (b && JIRA_URL_2 && b === normalizeJiraBaseUrl(JIRA_URL_2)) return "secondary";
+  return "primary";
+}
+
+function formatJiraIssueApiResponse(d, jiraBaseUrl) {
+  const f = d.fields || {};
+  const comments = (f.comment?.comments || []).slice(-3).map((c) => `[${c.author?.displayName}]: ${extractJiraText(c.body)}`).join("\n");
+  return {
+    id: d.key,
+    jiraBaseUrl: jiraBaseUrl || "",
+    jiraSite: jiraSiteLabelForBase(jiraBaseUrl),
+    summary: f.summary || "",
+    description: extractJiraText(f.description),
+    status: f.status?.name || "",
+    priority: f.priority?.name || "",
+    assignee: f.assignee?.displayName || "Unassigned",
+    reporter: f.reporter?.displayName || "",
+    created: (f.created || "").split("T")[0] || "",
+    updated: (f.updated || "").split("T")[0] || "",
+    labels: (f.labels || []).join(", "),
+    components: (f.components || []).map((c) => c.name).join(", "),
+    fixVersions: (f.fixVersions || []).map((v) => v.name).join(", "),
+    acceptanceCriteria: f.customfield_10023 || f.customfield_10034 || "",
+    comments,
+    attachments: (f.attachment || []).map((a) => a.filename).join(", "),
+  };
+}
+
 app.get("/api/jira-issue/:id", async (req, res) => {
-  const issueId = (req.params.id || "").toUpperCase();
-  if (!issueId) return res.status(400).json({ error: "Missing JIRA issue ID" });
-  if (!JIRA_URL || !JIRA_EMAIL || !JIRA_TOKEN) {
-    return res.status(400).json({ error: "JIRA not configured. Set JIRA_URL, JIRA_EMAIL, JIRA_TOKEN in .env" });
+  if (!JIRA_EMAIL || !JIRA_TOKEN) {
+    return res.status(400).json({ error: "JIRA not configured. Set JIRA_EMAIL, JIRA_TOKEN in .env" });
   }
+  const parsed = parseJiraIssueRequestParam(req.params.id);
+  const issueKey = parsed.issueKey;
+  if (!issueKey) return res.status(400).json({ error: "Missing JIRA issue key — paste a key (e.g. TPAP-123) or full browse URL." });
+
+  const basesToTry = resolveBasesForFetch(parsed, req.query);
+  if (!basesToTry.length) {
+    return res.status(400).json({ error: "No JIRA site configured. Set JIRA_URL (and optionally JIRA_URL_2) in .env." });
+  }
+
+  const tryLog = [];
   try {
-    const r = await fetch(`${JIRA_URL}/rest/api/3/issue/${issueId}`, {
-      headers: {
-        Authorization: "Basic " + Buffer.from(`${JIRA_EMAIL}:${JIRA_TOKEN}`).toString("base64"),
-        Accept: "application/json",
-      },
-    });
-    if (!r.ok) {
-      const e = await r.json().catch(() => ({}));
-      return res.status(r.status).json({ error: e.errorMessages?.[0] || r.statusText });
+    for (const base of basesToTry) {
+      const apiUrl = `${base}/rest/api/3/issue/${issueKey}`;
+      console.log(`[jira-fetch] GET ${apiUrl}`);
+      const r = await fetch(apiUrl, {
+        headers: { Authorization: jiraAuthHeader(), Accept: "application/json" },
+      });
+      const rawText = await r.text();
+      let data;
+      try {
+        data = rawText ? JSON.parse(rawText) : {};
+      } catch {
+        data = {};
+      }
+      if (r.ok) {
+        console.log(`[jira-fetch] OK ${issueKey} from ${base}`);
+        return res.json(formatJiraIssueApiResponse(data, base));
+      }
+      const msg =
+        (Array.isArray(data?.errorMessages) && data.errorMessages[0]) ||
+        data?.message ||
+        data?.errorMessage ||
+        r.statusText ||
+        `HTTP ${r.status}`;
+      console.error(`[jira-fetch] FAIL ${base} ${issueKey} status=${r.status}:`, msg);
+      if (data && typeof data === "object" && Object.keys(data).length) {
+        console.error(`[jira-fetch] response body (truncated):`, JSON.stringify(data).slice(0, 800));
+      }
+      tryLog.push({ base, status: r.status, message: String(msg) });
     }
-    const d = await r.json();
-    const f = d.fields || {};
-    const comments = (f.comment?.comments || []).slice(-3).map((c) => `[${c.author?.displayName}]: ${extractJiraText(c.body)}`).join("\n");
-    res.json({
-      id: d.key,
-      summary: f.summary || "",
-      description: extractJiraText(f.description),
-      status: f.status?.name || "",
-      priority: f.priority?.name || "",
-      assignee: f.assignee?.displayName || "Unassigned",
-      reporter: f.reporter?.displayName || "",
-      created: (f.created || "").split("T")[0] || "",
-      updated: (f.updated || "").split("T")[0] || "",
-      labels: (f.labels || []).join(", "),
-      components: (f.components || []).map((c) => c.name).join(", "),
-      fixVersions: (f.fixVersions || []).map((v) => v.name).join(", "),
-      acceptanceCriteria: f.customfield_10023 || f.customfield_10034 || "",
-      comments,
-      attachments: (f.attachment || []).map((a) => a.filename).join(", "),
+
+    const last = tryLog[tryLog.length - 1];
+    const summary =
+      tryLog.length > 1
+        ? `${last?.message || "Not found"} (tried ${tryLog.length} sites — see server log for details)`
+        : last?.message || "Issue does not exist or you do not have permission to see it.";
+    return res.status(404).json({
+      error: summary,
+      tried: tryLog,
+      issueKey,
     });
   } catch (err) {
+    console.error("[jira-fetch] exception:", err);
     res.status(500).json({ error: err.message });
   }
 });
 
-function jiraAuthHeader() {
-  return "Basic " + Buffer.from(`${JIRA_EMAIL}:${JIRA_TOKEN}`).toString("base64");
+function looksLikeJiraAccountId(s) {
+  const t = String(s || "").trim();
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(t);
+}
+
+/** Atlassian Cloud scoped account id, e.g. 712020:43e3961c-6f66-4321-8971-8e25d446eb56 */
+function looksLikeJiraScopedAccountId(s) {
+  const t = String(s || "").trim();
+  return /^\d+:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(t);
+}
+
+/** Create issue / user fields: Atlassian samples use { id: "…" } (scoped or legacy id). */
+function jiraUserFieldRef(accountIdOrId) {
+  const id = String(accountIdOrId || "").trim();
+  if (!id) return null;
+  return { id };
+}
+
+/** Resolve email / display name → { id } for JIRA Cloud REST. */
+async function jiraResolveUserPickerValue(query, jiraBase) {
+  const base = normalizeJiraBaseUrl(jiraBase) || JIRA_URL;
+  const q = String(query || "").trim();
+  if (!q) return null;
+  if (looksLikeJiraAccountId(q) || looksLikeJiraScopedAccountId(q)) return jiraUserFieldRef(q);
+  const url = `${base}/rest/api/3/user/search?query=${encodeURIComponent(q)}&maxResults=10`;
+  const r = await fetch(url, {
+    headers: { Authorization: jiraAuthHeader(), Accept: "application/json" },
+  });
+  const users = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    const msg = Array.isArray(users?.errorMessages) ? users.errorMessages.join("; ") : `HTTP ${r.status}`;
+    console.error(`[jira] user/search failed on ${base}:`, msg);
+    throw new Error(`JIRA user search failed: ${msg}`);
+  }
+  if (!Array.isArray(users) || users.length === 0) {
+    throw new Error(
+      `No JIRA user found for "${q}". Use full email (e.g. Deepankar.pathak@finmate.tech), display name, or paste Atlassian accountId (UUID).`
+    );
+  }
+  if (users.length > 1) {
+    const brief = users
+      .slice(0, 5)
+      .map((u) => `${u.displayName || "?"} <${u.emailAddress || u.accountId}>`)
+      .join(" | ");
+    console.warn(`[jira] user search "${q}" returned ${users.length} matches; using first. Sample: ${brief}`);
+  }
+  return jiraUserFieldRef(users[0].accountId);
+}
+
+/**
+ * Sets Dev Assignee (user picker) on create. Priority: request devAssignee → JIRA_DEV_ASSIGNEE_ACCOUNT_ID → JIRA_DEV_ASSIGNEE.
+ * Omit all to skip (JIRA may still error if the field is required).
+ */
+async function resolveDevAssigneeFields(bodyDevAssignee, jiraBase) {
+  if (!JIRA_DEV_ASSIGNEE_FIELD_ID) return {};
+
+  const body = String(bodyDevAssignee || "").trim();
+  const envAccount = String(process.env.JIRA_DEV_ASSIGNEE_ACCOUNT_ID || "").trim();
+  const envQuery = String(process.env.JIRA_DEV_ASSIGNEE || "").trim();
+
+  let picker = null;
+  if (body) {
+    picker =
+      looksLikeJiraAccountId(body) || looksLikeJiraScopedAccountId(body)
+        ? jiraUserFieldRef(body)
+        : await jiraResolveUserPickerValue(body, jiraBase);
+  } else if (envAccount) {
+    picker =
+      looksLikeJiraAccountId(envAccount) || looksLikeJiraScopedAccountId(envAccount)
+        ? jiraUserFieldRef(envAccount)
+        : await jiraResolveUserPickerValue(envAccount, jiraBase);
+  } else if (envQuery) {
+    picker =
+      looksLikeJiraAccountId(envQuery) || looksLikeJiraScopedAccountId(envQuery)
+        ? jiraUserFieldRef(envQuery)
+        : await jiraResolveUserPickerValue(envQuery, jiraBase);
+  }
+
+  if (!picker?.id) return {};
+  // Multi-user picker → must be [{ id }]. Single-user custom field → { id } only if env set.
+  const fieldValue = JIRA_DEV_ASSIGNEE_SINGLE_USER_OBJECT ? picker : [picker];
+  return { [JIRA_DEV_ASSIGNEE_FIELD_ID]: fieldValue };
+}
+
+function normalizeJiraLabelStringsFromRequest(raw) {
+  if (raw == null) return [];
+  const list = Array.isArray(raw) ? raw : typeof raw === "string" ? raw.split(/[,\n]/) : [];
+  const out = [...new Set(list.map((s) => String(s).trim()).filter(Boolean))];
+  return out.slice(0, 25);
+}
+
+function mergeLabelsIntoJiraFields(fields, labelStrings) {
+  const labels = normalizeJiraLabelStringsFromRequest(labelStrings);
+  if (!labels.length) return fields;
+  return { ...fields, labels };
+}
+
+function normalizeNotifyDomainLabels(body) {
+  const n = body?.notifyDomainLabels;
+  if (Array.isArray(n)) return n.map((s) => String(s).trim()).filter(Boolean).slice(0, 30);
+  return [];
+}
+
+/** After JIRA Agent creates issue(s); uses same SMTP as Share / NOTIFY. */
+async function sendJiraAgentCreatedEmail({ issueKeys, summary, domainLabels }) {
+  const keys = (Array.isArray(issueKeys) ? issueKeys : []).map((k) => String(k || "").trim()).filter(Boolean);
+  if (!keys.length) return;
+  const to = String(process.env.JIRA_CREATE_NOTIFY_TO || process.env.NOTIFY_EMAIL || process.env.EMAIL_USER || "").trim();
+  const hasSmtp = !!(process.env.EMAIL_SMTP_HOST || process.env.EMAIL_USER);
+  if (!to || !hasSmtp) {
+    console.log("[jira-create-mail] skipped (set JIRA_CREATE_NOTIFY_TO or NOTIFY_EMAIL, and EMAIL_* for SMTP)");
+    return;
+  }
+  const greeting = String(process.env.JIRA_CREATE_GREETING_NAME || "Deepankar").trim() || "Deepankar";
+  const sum = String(summary || "Ticket").trim().slice(0, 240);
+  const subject = `${keys.join(", ")} - ${sum} Created`;
+  const domainPart =
+    Array.isArray(domainLabels) && domainLabels.length ? domainLabels.join(", ") : "the selected domain(s)";
+  const idsLine = keys.join(", ");
+  const html = `Hi ${greeting},<br/>JIRA has been created successfully for ${domainPart}.<br/> Please refer to ${idsLine}.`;
+  const text = `Hi ${greeting},\n\nJIRA has been created successfully for ${domainPart}.\n\nPlease refer to ${idsLine}.`;
+  try {
+    const nodemailer = (await import("nodemailer")).default;
+    const transportOpts = {
+      host: process.env.EMAIL_SMTP_HOST || "smtp.gmail.com",
+      port: Number(process.env.EMAIL_SMTP_PORT) || 587,
+      secure: process.env.EMAIL_SECURE === "true",
+      auth: process.env.EMAIL_USER ? { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS || process.env.EMAIL_PASSWORD } : undefined,
+    };
+    const transporter = nodemailer.createTransport(transportOpts);
+    await transporter.sendMail({
+      from: process.env.EMAIL_FROM || process.env.EMAIL_USER || "noreply@local",
+      to,
+      subject,
+      text,
+      html,
+    });
+    console.log("[jira-create-mail] sent:", subject.slice(0, 100));
+  } catch (e) {
+    console.error("[jira-create-mail] failed:", e.message);
+  }
+}
+
+/** Safe logging of fields (avoid dumping huge ADF). */
+function summarizeJiraFieldsForLog(fields) {
+  const f = fields && typeof fields === "object" ? { ...fields } : {};
+  if (f.description && typeof f.description === "object") {
+    const raw = JSON.stringify(f.description);
+    f.description = `<ADF, ${raw.length} chars>`;
+  } else if (typeof f.description === "string") {
+    f.description = `<string, ${f.description.length} chars>`;
+  }
+  return f;
 }
 
 function formatJiraApiError(data) {
@@ -373,8 +795,13 @@ function buildSubtaskIssuetypeField({ issueTypeId, issueTypeName }) {
   return { name };
 }
 
-async function jiraCreateIssue(fields) {
-  const r = await fetch(`${JIRA_URL}/rest/api/3/issue`, {
+async function jiraCreateIssue(fields, logLabel, jiraBase) {
+  const base = normalizeJiraBaseUrl(jiraBase) || JIRA_URL;
+  const postUrl = `${base}/rest/api/3/issue`;
+  if (logLabel) {
+    console.log(`${logLabel} POST ${postUrl} fields:`, JSON.stringify(summarizeJiraFieldsForLog(fields), null, 2));
+  }
+  const r = await fetch(postUrl, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -384,6 +811,9 @@ async function jiraCreateIssue(fields) {
   });
   const data = await r.json().catch(() => ({}));
   if (!r.ok) {
+    if (logLabel) {
+      console.error(`${logLabel} JIRA ${base} response ${r.status}:`, JSON.stringify(data, null, 2));
+    }
     const err = new Error(formatJiraApiError(data));
     err.status = r.status;
     err.details = data;
@@ -392,20 +822,68 @@ async function jiraCreateIssue(fields) {
   return data;
 }
 
+/** JIRA sometimes rejects rich ADF; fall back to a single paragraph of plain text. */
+function jiraMinimalDescriptionAdf(markdown) {
+  const text = String(markdown || "")
+    .replace(/\r/g, "")
+    .replace(/\0/g, "")
+    .slice(0, 32000);
+  return {
+    type: "doc",
+    version: 1,
+    content: [{ type: "paragraph", content: [{ type: "text", text: text.trim() ? text : "(empty)" }] }],
+  };
+}
+
+async function jiraCreateIssueWithMarkdownDescription(fieldsBase, markdown, logLabel, jiraBase) {
+  const md = String(markdown || "");
+  const adf = markdownToJiraAdf(md)?.body;
+  const fields = { ...fieldsBase, ...(adf ? { description: adf } : {}) };
+  try {
+    return await jiraCreateIssue(fields, logLabel, jiraBase);
+  } catch (e) {
+    const m = String(e.message || "").toLowerCase();
+    const errKeys = e.details?.errors ? Object.keys(e.details.errors).join(" ").toLowerCase() : "";
+    const retry =
+      fields.description &&
+      (m.includes("description") ||
+        m.includes("document") ||
+        m.includes("adf") ||
+        errKeys.includes("description"));
+    if (retry) {
+      return await jiraCreateIssue(
+        {
+          ...fieldsBase,
+          description: jiraMinimalDescriptionAdf(md),
+        },
+        logLabel ? `${logLabel} (retry minimal description)` : undefined,
+        jiraBase
+      );
+    }
+    throw e;
+  }
+}
+
 app.get("/api/jira/issue-types", async (req, res) => {
   const projectKey = String(req.query.projectKey || "").trim().toUpperCase();
   if (!projectKey) return res.status(400).json({ success: false, error: "Missing projectKey query" });
-  if (!JIRA_URL || !JIRA_EMAIL || !JIRA_TOKEN) {
+  if (!listConfiguredJiraBases().length || !JIRA_EMAIL || !JIRA_TOKEN) {
     return res.status(400).json({ success: false, error: "JIRA not configured in .env" });
   }
   try {
-    const url = `${JIRA_URL}/rest/api/3/issue/createmeta?projectKeys=${encodeURIComponent(projectKey)}&expand=projects.issuetypes`;
+    const jiraBase = resolveJiraBaseForWrite(projectKey, {
+      jiraSite: req.query.jiraSite,
+      jiraBaseUrl: req.query.jiraBaseUrl,
+    });
+    const url = `${jiraBase}/rest/api/3/issue/createmeta?projectKeys=${encodeURIComponent(projectKey)}&expand=projects.issuetypes`;
+    console.log(`[api/jira/issue-types] GET ${url}`);
     const r = await fetch(url, {
       headers: { Authorization: jiraAuthHeader(), Accept: "application/json" },
     });
     const data = await r.json().catch(() => ({}));
     if (!r.ok) {
-      return res.status(r.status).json({ success: false, error: formatJiraApiError(data) });
+      console.error(`[api/jira/issue-types] FAIL ${jiraBase}:`, formatJiraApiError(data));
+      return res.status(r.status).json({ success: false, error: formatJiraApiError(data), jiraBaseUrl: jiraBase });
     }
     const proj = (data.projects || [])[0];
     const types = (proj?.issuetypes || []).map((t) => ({
@@ -413,73 +891,216 @@ app.get("/api/jira/issue-types", async (req, res) => {
       name: t.name,
       subtask: !!t.subtask,
     }));
-    res.json({ success: true, projectKey, types });
+    res.json({ success: true, projectKey, types, jiraBaseUrl: jiraBase });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
 app.post("/api/jira/create", async (req, res) => {
+  const logP = "[api/jira/create]";
   try {
-    const { projectKey, summary, description, issueType, issueTypeId } = req.body || {};
+    const { projectKey, summary, description, issueType, issueTypeId, devAssignee, labels, jiraSite, jiraBaseUrl } = req.body || {};
+    let jiraBase;
+    try {
+      jiraBase = resolveJiraBaseForWrite(projectKey, { jiraSite, jiraBaseUrl });
+    } catch (e) {
+      return res.status(400).json({ success: false, error: e.message || String(e) });
+    }
+    console.log(`${logP} JIRA base:`, jiraBase);
+    console.log(
+      `${logP} incoming body:`,
+      JSON.stringify(
+        {
+          projectKey: projectKey || null,
+          summary: summary ? String(summary).slice(0, 120) + (String(summary).length > 120 ? "…" : "") : null,
+          description: `(markdown, ${String(description || "").length} chars)`,
+          issueType: issueType || null,
+          issueTypeId: issueTypeId || null,
+          devAssignee: devAssignee || null,
+          labels: Array.isArray(labels) ? labels : null,
+          jiraSite: jiraSite || null,
+        },
+        null,
+        2
+      )
+    );
     if (!projectKey || !summary || !description) {
+      console.error("[api/jira/create] 400 validation:", {
+        hasProjectKey: !!projectKey,
+        hasSummary: !!summary,
+        hasDescription: !!description,
+      });
       return res.status(400).json({ success: false, error: "Missing projectKey, summary, or description" });
     }
-    if (!JIRA_URL || !JIRA_EMAIL || !JIRA_TOKEN) {
+    if (!jiraBase || !JIRA_EMAIL || !JIRA_TOKEN) {
+      console.error("[api/jira/create] 400 JIRA credentials missing in env");
       return res.status(400).json({ success: false, error: "JIRA not configured in .env" });
     }
     const cleanProjectKey = String(projectKey).trim().toUpperCase();
     const cleanSummary = String(summary).trim().slice(0, 255);
     if (!cleanSummary) {
+      console.error("[api/jira/create] 400 empty summary after trim");
       return res.status(400).json({ success: false, error: "Summary is empty — set Feature / Ticket Title or ensure the draft starts with # Title" });
     }
+    let assigneeFields = {};
+    try {
+      assigneeFields = await resolveDevAssigneeFields(devAssignee, jiraBase);
+    } catch (e) {
+      console.error(`${logP} dev assignee resolution failed:`, e.message);
+      return res.status(400).json({ success: false, error: e.message || String(e) });
+    }
+    if (Object.keys(assigneeFields).length) {
+      console.log(`${logP} resolved Dev Assignee (${JIRA_DEV_ASSIGNEE_FIELD_ID}):`, JSON.stringify(assigneeFields, null, 2));
+    }
     const md = String(description);
-    const adf = markdownToJiraAdf(md)?.body;
-    const payload = {
-      project: { key: cleanProjectKey },
-      summary: cleanSummary,
-      issuetype: buildIssuetypeField({ issueTypeName: issueType, issueTypeId }),
-      ...(adf ? { description: adf } : {}),
-    };
-    const data = await jiraCreateIssue(payload);
+    const fieldsBase = mergeLabelsIntoJiraFields(
+      {
+        project: { key: cleanProjectKey },
+        summary: cleanSummary,
+        issuetype: buildIssuetypeField({ issueTypeName: issueType, issueTypeId }),
+        ...assigneeFields,
+      },
+      labels
+    );
+    const data = await jiraCreateIssueWithMarkdownDescription(fieldsBase, md, logP, jiraBase);
     const key = data.key || "";
+    void sendJiraAgentCreatedEmail({
+      issueKeys: key ? [key] : [],
+      summary: cleanSummary,
+      domainLabels: normalizeNotifyDomainLabels(req.body),
+    });
     res.json({
       success: true,
       key,
       id: data.id,
       self: data.self,
-      browseUrl: key ? `${JIRA_URL}/browse/${key}` : "",
+      browseUrl: key ? `${jiraBase}/browse/${key}` : "",
+      jiraBaseUrl: jiraBase,
     });
   } catch (err) {
     const status = err.status && Number(err.status) >= 400 ? err.status : 500;
+    const details = err.details && typeof err.details === "object" ? JSON.stringify(err.details) : "";
+    console.error("[api/jira/create] failed:", status, err.message || err, details || "");
     res.status(status).json({ success: false, error: err.message || String(err) });
   }
 });
 
-app.post("/api/jira/create-with-subtasks", async (req, res) => {
+app.post("/api/jira/attach", upload.array("files", 12), async (req, res) => {
   try {
-    const { projectKey, parent, subtasks } = req.body || {};
+    const issueKey = String(req.body.issueKey || "").trim().toUpperCase().replace(/\s/g, "");
+    if (!issueKey || !req.files?.length) {
+      return res.status(400).json({ success: false, error: "Missing issueKey or files" });
+    }
+    if (!listConfiguredJiraBases().length || !JIRA_EMAIL || !JIRA_TOKEN) {
+      return res.status(400).json({ success: false, error: "JIRA not configured in .env" });
+    }
+    let jiraBase;
+    try {
+      jiraBase = resolveJiraBaseFromIssueKey(issueKey, {
+        jiraSite: req.body.jiraSite,
+        jiraBaseUrl: req.body.jiraBaseUrl,
+      });
+    } catch (e) {
+      return res.status(400).json({ success: false, error: e.message || String(e) });
+    }
+    const form = new FormData();
+    for (const f of req.files) {
+      form.append("file", f.buffer, {
+        filename: f.originalname || "attachment",
+        contentType: f.mimetype || "application/octet-stream",
+      });
+    }
+    const url = `${jiraBase}/rest/api/3/issue/${encodeURIComponent(issueKey)}/attachments`;
+    console.log(`[api/jira/attach] POST ${url}`);
+    const r = await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: jiraAuthHeader(),
+        "X-Atlassian-Token": "no-check",
+        ...form.getHeaders(),
+      },
+      body: form,
+    });
+    const text = await r.text();
+    let data;
+    try {
+      data = text ? JSON.parse(text) : [];
+    } catch {
+      data = text;
+    }
+    if (!r.ok) {
+      const errMsg =
+        typeof data === "object" && data?.errorMessages?.[0] ? data.errorMessages[0] : String(text).slice(0, 400) || r.statusText;
+      console.error(`[api/jira/attach] FAIL ${url}:`, errMsg);
+      return res.status(r.status).json({
+        success: false,
+        error: errMsg,
+      });
+    }
+    res.json({ success: true, attachments: Array.isArray(data) ? data : [] });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post("/api/jira/create-with-subtasks", async (req, res) => {
+  const logP = "[api/jira/create-with-subtasks]";
+  try {
+    const { projectKey, parent, subtasks, devAssignee, labels, jiraSite, jiraBaseUrl } = req.body || {};
+    let jiraBase;
+    try {
+      jiraBase = resolveJiraBaseForWrite(projectKey, { jiraSite, jiraBaseUrl });
+    } catch (e) {
+      return res.status(400).json({ success: false, error: e.message || String(e) });
+    }
+    console.log(`${logP} JIRA base:`, jiraBase);
+    console.log(
+      `${logP} incoming:`,
+      JSON.stringify(
+        {
+          projectKey: projectKey || null,
+          devAssignee: devAssignee || null,
+          parentSummary: parent?.summary ? String(parent.summary).slice(0, 120) : null,
+          parentDescriptionLen: String(parent?.description || "").length,
+          subtaskCount: Array.isArray(subtasks) ? subtasks.length : 0,
+          labels: Array.isArray(labels) ? labels : null,
+          jiraSite: jiraSite || null,
+        },
+        null,
+        2
+      )
+    );
     if (!projectKey || !parent?.summary || !parent?.description) {
       return res.status(400).json({ success: false, error: "Missing projectKey or parent.summary / parent.description" });
     }
-    if (!JIRA_URL || !JIRA_EMAIL || !JIRA_TOKEN) {
+    if (!jiraBase || !JIRA_EMAIL || !JIRA_TOKEN) {
       return res.status(400).json({ success: false, error: "JIRA not configured in .env" });
+    }
+    let assigneeFields = {};
+    try {
+      assigneeFields = await resolveDevAssigneeFields(devAssignee, jiraBase);
+    } catch (e) {
+      console.error(`${logP} dev assignee resolution failed:`, e.message);
+      return res.status(400).json({ success: false, error: e.message || String(e) });
     }
     const cleanProjectKey = String(projectKey).trim().toUpperCase();
     const parentSummary = String(parent.summary).trim().slice(0, 255);
     if (!parentSummary) return res.status(400).json({ success: false, error: "Parent summary is empty" });
     const parentMd = String(parent.description);
-    const parentAdf = markdownToJiraAdf(parentMd)?.body;
-    const parentFields = {
-      project: { key: cleanProjectKey },
-      summary: parentSummary,
-      issuetype: buildIssuetypeField({
-        issueTypeName: parent.issueType,
-        issueTypeId: parent.issueTypeId,
-      }),
-      ...(parentAdf ? { description: parentAdf } : {}),
-    };
-    const createdParent = await jiraCreateIssue(parentFields);
+    const parentFieldsBase = mergeLabelsIntoJiraFields(
+      {
+        project: { key: cleanProjectKey },
+        summary: parentSummary,
+        issuetype: buildIssuetypeField({
+          issueTypeName: parent.issueType,
+          issueTypeId: parent.issueTypeId,
+        }),
+        ...assigneeFields,
+      },
+      labels
+    );
+    const createdParent = await jiraCreateIssueWithMarkdownDescription(parentFieldsBase, parentMd, `${logP} parent`, jiraBase);
     const parentKey = createdParent.key || "";
     const createdSubs = [];
     const list = Array.isArray(subtasks) ? subtasks : [];
@@ -487,35 +1108,48 @@ app.post("/api/jira/create-with-subtasks", async (req, res) => {
       const sum = String(st?.summary || "").trim().slice(0, 255);
       if (!sum) continue;
       const bodyMd = String(st?.description || st?.body || "").trim() || sum;
-      const stAdf = markdownToJiraAdf(bodyMd)?.body;
-      const subFields = {
-        project: { key: cleanProjectKey },
-        parent: { key: parentKey },
-        summary: sum,
-        issuetype: buildSubtaskIssuetypeField({
-          issueTypeId: st.issueTypeId,
-          issueTypeName: st.issueType,
-        }),
-        ...(stAdf ? { description: stAdf } : {}),
-      };
+      const subFieldsBase = mergeLabelsIntoJiraFields(
+        {
+          project: { key: cleanProjectKey },
+          parent: { key: parentKey },
+          summary: sum,
+          issuetype: buildSubtaskIssuetypeField({
+            issueTypeId: st.issueTypeId,
+            issueTypeName: st.issueType,
+          }),
+          ...assigneeFields,
+        },
+        labels
+      );
       try {
-        const subData = await jiraCreateIssue(subFields);
+        const subData = await jiraCreateIssueWithMarkdownDescription(subFieldsBase, bodyMd, `${logP} sub`, jiraBase);
         createdSubs.push({
           key: subData.key,
-          browseUrl: subData.key ? `${JIRA_URL}/browse/${subData.key}` : "",
+          browseUrl: subData.key ? `${jiraBase}/browse/${subData.key}` : "",
         });
       } catch (e) {
+        console.error(`${logP} subtask create failed:`, e.message);
         createdSubs.push({ error: e.message || String(e) });
       }
     }
+    const subKeys = createdSubs.map((s) => s.key).filter(Boolean);
+    const allKeys = parentKey ? [parentKey, ...subKeys] : subKeys;
+    void sendJiraAgentCreatedEmail({
+      issueKeys: allKeys,
+      summary: parentSummary,
+      domainLabels: normalizeNotifyDomainLabels(req.body),
+    });
     res.json({
       success: true,
       parentKey,
-      parentBrowseUrl: parentKey ? `${JIRA_URL}/browse/${parentKey}` : "",
+      parentBrowseUrl: parentKey ? `${jiraBase}/browse/${parentKey}` : "",
       subtasks: createdSubs,
+      jiraBaseUrl: jiraBase,
     });
   } catch (err) {
     const status = err.status && Number(err.status) >= 400 ? err.status : 500;
+    const details = err.details && typeof err.details === "object" ? JSON.stringify(err.details) : "";
+    console.error(`${logP} failed:`, status, err.message || err, details || "");
     res.status(status).json({ success: false, error: err.message || String(err) });
   }
 });
@@ -569,21 +1203,34 @@ app.post("/api/save-agent-output", (req, res) => {
 
 app.post("/api/share/jira", async (req, res) => {
   try {
-    const { issueKey, text, title } = req.body || {};
+    const { issueKey, text, title, jiraSite, jiraBaseUrl } = req.body || {};
     if (!issueKey || !text) return res.status(400).json({ success: false, error: "Missing issueKey or text" });
-    if (!JIRA_URL || !JIRA_EMAIL || !JIRA_TOKEN) return res.status(400).json({ success: false, error: "JIRA not configured in .env" });
+    if (!listConfiguredJiraBases().length || !JIRA_EMAIL || !JIRA_TOKEN) {
+      return res.status(400).json({ success: false, error: "JIRA not configured in .env" });
+    }
     const key = String(issueKey).toUpperCase().replace(/\s/g, "");
+    let jiraBase;
+    try {
+      jiraBase = resolveJiraBaseFromIssueKey(key, { jiraSite, jiraBaseUrl });
+    } catch (e) {
+      return res.status(400).json({ success: false, error: e.message || String(e) });
+    }
     const md = title ? `## ${title}\n\n${text}` : String(text);
-    const r = await fetch(`${JIRA_URL}/rest/api/3/issue/${key}/comment`, {
+    const commentUrl = `${jiraBase}/rest/api/3/issue/${key}/comment`;
+    console.log(`[api/share/jira] POST ${commentUrl}`);
+    const r = await fetch(commentUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: "Basic " + Buffer.from(`${JIRA_EMAIL}:${JIRA_TOKEN}`).toString("base64"),
+        Authorization: jiraAuthHeader(),
       },
       body: JSON.stringify(markdownToJiraAdf(md)),
     });
     const data = await r.json().catch(() => ({}));
-    if (!r.ok) return res.status(r.status).json({ success: false, error: data.errorMessages?.[0] || r.statusText });
+    if (!r.ok) {
+      console.error(`[api/share/jira] FAIL:`, data.errorMessages?.[0] || r.statusText, JSON.stringify(data).slice(0, 400));
+      return res.status(r.status).json({ success: false, error: data.errorMessages?.[0] || r.statusText });
+    }
     res.json({ success: true, id: data.id });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });

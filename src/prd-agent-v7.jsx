@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import { API_BASE, sendCompletionNotify } from "./config.js";
 import ShareAndScore from "./ShareAndScore.jsx";
-import { syncPublishDefaultJiraKey } from "./ConnectorsStatus.jsx";
+import { syncPublishDefaultJiraKey, loadPublishDefaults, syncPublishJiraSiteFromIssue } from "./ConnectorsStatus.jsx";
 import { exportAgentOutput } from "./agentExport.js";
 import { buildShareSubjectLine } from "./shareSubject.js";
 
@@ -386,17 +386,23 @@ export default function PRDAgent() {
   }
 
   const handleFetchJiraPRD = async () => {
-    const key = parseJiraIssueKey(jiraIssueKey);
-    if (!key) { setJiraFetchError("Enter a JIRA issue key (e.g. TSP-1889) or paste a JIRA URL."); return; }
+    const raw = jiraIssueKey.trim();
+    const key = parseJiraIssueKey(raw);
+    if (!key && !raw) { setJiraFetchError("Enter a JIRA issue key (e.g. TSP-1889) or paste a JIRA URL."); return; }
     setJiraFetchError("");
     setJiraFetchLoading(true);
     try {
-      const r = await fetch(`${API_BASE}/api/jira-issue/${encodeURIComponent(key)}`, { headers: { Accept: "application/json" } });
+      const defs = loadPublishDefaults();
+      const site = defs.jiraWriteSite;
+      const siteQs = site && site !== "auto" ? `?site=${encodeURIComponent(site)}` : "";
+      const idParam = raw || key;
+      const r = await fetch(`${API_BASE}/api/jira-issue/${encodeURIComponent(idParam)}${siteQs}`, { headers: { Accept: "application/json" } });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d.error || `JIRA error ${r.status}`);
       const parts = [d.summary ? `JIRA: ${d.id} — ${d.summary}` : `JIRA: ${d.id}`, d.description, d.acceptanceCriteria ? `Acceptance criteria:\n${d.acceptanceCriteria}` : ""].filter(Boolean);
       setInput(parts.join("\n\n"));
       syncPublishDefaultJiraKey(d.id || key);
+      syncPublishJiraSiteFromIssue(d);
     } catch (e) {
       setJiraFetchError(e.message || "JIRA fetch failed");
     }
