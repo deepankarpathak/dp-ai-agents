@@ -259,6 +259,7 @@ export default function BRDAgent() {
 
   const fileRef = useRef();
   const feedbackFileRef = useRef();
+  const hasSentNotifyRef = useRef(false);
 
   useEffect(() => { saveHistoryLS(history); }, [history]);
   useEffect(() => { saveFeedbackMemory(feedbackMemory); }, [feedbackMemory]);
@@ -348,11 +349,14 @@ export default function BRDAgent() {
         content: raw,
       });
       setAllowAutoPublish(true);
-      await sendCompletionNotify({
-        agentName: "BRD Agent",
-        identifier: jiraId || subject || "BRD",
-        notifySubject: buildShareSubjectLine("brd", parseJiraIssueKey(jiraId), subject || "BRD"),
-      });
+      if (!hasSentNotifyRef.current) {
+        hasSentNotifyRef.current = true;
+        await sendCompletionNotify({
+          agentName: "BRD Agent",
+          identifier: jiraId || subject || "BRD",
+          notifySubject: buildShareSubjectLine("brd", parseJiraIssueKey(jiraId), subject || "BRD"),
+        });
+      }
     } catch (e) { setError("Error: " + e.message); setPhase("input"); }
     setLoading(false);
   };
@@ -391,11 +395,14 @@ export default function BRDAgent() {
       setFeedbackText("");
       setStatusMsg("");
       setAllowAutoPublish(true);
-      await sendCompletionNotify({
-        agentName: "BRD Agent",
-        identifier: jiraId || subject || "BRD",
-        notifySubject: buildShareSubjectLine("brd", parseJiraIssueKey(jiraId), (subject || "BRD") + "-revised"),
-      });
+      if (!hasSentNotifyRef.current) {
+        hasSentNotifyRef.current = true;
+        await sendCompletionNotify({
+          agentName: "BRD Agent",
+          identifier: jiraId || subject || "BRD",
+          notifySubject: buildShareSubjectLine("brd", parseJiraIssueKey(jiraId), (subject || "BRD") + "-revised"),
+        });
+      }
     } catch (e) { setError("Error: " + e.message); }
     setLoading(false);
   };

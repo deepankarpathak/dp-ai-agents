@@ -12,6 +12,8 @@ const PUBLISH_DEFAULTS_EMPTY = {
   jiraDevAssignee: "",
   /** auto | primary | secondary — default Atlassian site for fetch / create / Share when the issue key has no URL. */
   jiraWriteSite: "auto",
+  /** openai | foundry — which backend Share & Score uses for Get score */
+  scoreProvider: "openai",
 };
 function loadPublishDefaults() {
   try {

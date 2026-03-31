@@ -12,7 +12,7 @@ On the **success screen** of each agent (PRD, UAT, BRD) you get:
 
 1. **Publish** – One-click send to JIRA, Slack, Telegram, and/or Email using **pre-configured defaults** (no typing).
 2. **Share** – Buttons to post to JIRA, send to Telegram, or email. All use the **defaults from Connectors** (no duplicate inputs).
-3. **Score** – Get a 1–10 score and short rationale using OpenAI (e.g. GPT 5.4 when available).
+3. **Score** – Get a 1–10 score and short rationale using **OpenAI** or **Foundry** (your internal LLM gateway), chosen in the UI.
 
 ---
 
@@ -51,15 +51,24 @@ JIRA, Telegram, and Email **use the same defaults** you set in Connectors → De
 
 ---
 
-## Score (GPT 5.4 / configurable)
+## Score (OpenAI or Foundry)
 
-- **Button:** “Get score (GPT)”
-- **Backend:** Calls OpenAI API with the document and a scoring prompt; returns `score`, `maxScore` (10), and `rationale`.
-- **Env:**
-  - `OPENAI_API_KEY` – required for scoring.
-  - `SCORE_MODEL` – model name (default `gpt-4o`). Set to `gpt-5.4` (or the exact name when available) for GPT 5.4.
+- **Control:** Dropdown **Score with:** — **OpenAI** or **Foundry / internal LLM**. The choice is saved in browser defaults (same storage as Connectors publish defaults: `scoreProvider`).
+- **Buttons:** “Get score (OpenAI)” or “Get score (Foundry)” depending on selection.
+- **Backend:** `POST /api/score` with `scoreProvider: "openai" | "foundry"` (default `openai` if omitted).
+- **`GET /api/config`** exposes `scoreOpenAiConfigured` and `scoreFoundryConfigured` so the UI can disable unavailable options.
 
-Scoring is separate from the main PRD/UAT/BRD LLM (Anthropic/gateway): it uses OpenAI only for this step.
+### OpenAI pipe
+
+- **Env:** `OPENAI_API_KEY` (required for this pipe), `SCORE_MODEL` (default `gpt-4o`).
+
+### Foundry pipe
+
+- **Auth:** Same as agents — `LLM_KEY_API` or `LLM_API_KEY`.
+- **Env (optional overrides used only for scoring):**
+  - `SCORE_LLM_URL` — e.g. `https://tfy.internal.ap-south-1.production.apps.pai.mypaytm.com/api/llm` (can differ from `LLM_URL` if agents use `.../messages`).
+  - `SCORE_LLM_MODEL` — e.g. `azure-paytm-east-us2/gpt-5.1` or `azure-paytm-east-us2/gpt-5.4`.
+- If `SCORE_LLM_URL` / `SCORE_LLM_MODEL` are unset, scoring uses `LLM_URL` and `LLM_MODEL` from your main LLM block in `.env`.
 
 ---
 

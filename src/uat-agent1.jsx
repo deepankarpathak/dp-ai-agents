@@ -485,6 +485,7 @@ export default function TestSentinel() {
   useEffect(() => { saveUATFeedbackMemoryLS(feedbackMemory); }, [feedbackMemory]);
 
   const jiraRef = useRef(); const testRef = useRef(); const docsRef = useRef(); const fbRef = useRef();
+  const hasSentNotifyRef = useRef(false);
 
   function parseJiraIssueKey(input) {
     const s = (input || "").trim();
@@ -628,11 +629,14 @@ export default function TestSentinel() {
         content: signoff,
       });
       setAllowAutoPublish(true);
-      await sendCompletionNotify({
-        agentName: "UAT Agent",
-        identifier: jiraSubject || jiraIssueKey || "UAT Signoff",
-        notifySubject: buildShareSubjectLine("uat", jiraKey, jiraSubject || "UAT Signoff"),
-      });
+      if (!hasSentNotifyRef.current) {
+        hasSentNotifyRef.current = true;
+        await sendCompletionNotify({
+          agentName: "UAT Agent",
+          identifier: jiraSubject || jiraIssueKey || "UAT Signoff",
+          notifySubject: buildShareSubjectLine("uat", jiraKey, jiraSubject || "UAT Signoff"),
+        });
+      }
     } catch(e) { setStatusMsg("Error: "+e.message); }
     finally { setLoading(false); }
   };
@@ -668,11 +672,14 @@ export default function TestSentinel() {
       if (fbSummary) setFeedbackMemory(prev => [...prev, fbSummary.slice(0, 200)].slice(-20));
       setFeedbackText(""); setFeedbackFiles([]); setFeedbackFC([]);
       setAllowAutoPublish(true);
-      await sendCompletionNotify({
-        agentName: "UAT Agent",
-        identifier: (jiraSubject || jiraIssueKey || "UAT Signoff") + " (revised)",
-        notifySubject: buildShareSubjectLine("uat", jiraKey, (jiraSubject || "UAT Signoff") + "-revised"),
-      });
+      if (!hasSentNotifyRef.current) {
+        hasSentNotifyRef.current = true;
+        await sendCompletionNotify({
+          agentName: "UAT Agent",
+          identifier: (jiraSubject || jiraIssueKey || "UAT Signoff") + " (revised)",
+          notifySubject: buildShareSubjectLine("uat", jiraKey, (jiraSubject || "UAT Signoff") + "-revised"),
+        });
+      }
     } catch(e) { console.error(e); }
     finally { setFeedbackLoading(false); }
   };

@@ -516,6 +516,7 @@ export default function JiraAgent() {
   const [showHistory, setShowHistory] = useState(false);
   /** History entry id used to persist linked JIRAs after create (set on generate or load). */
   const historyAnchorRef = useRef(null);
+  const hasSentNotifyRef = useRef(false);
 
   const jiraLabelsForCreate = useMemo(() => jiraLabelsFromDomainIds(selectedDomains), [selectedDomains]);
   const notifyDomainLabelsForCreate = useMemo(() => domainDisplayNamesForNotify(selectedDomains), [selectedDomains]);
@@ -816,11 +817,14 @@ export default function JiraAgent() {
         subject: displayTitle,
         content: md + (nextSubs.length ? `\n\n---\n## Proposed sub-JIRAs\n${JSON.stringify(nextSubs, null, 2)}` : ""),
       });
-      await sendCompletionNotify({
-        agentName: "JIRA Agent",
-        identifier: displayTitle,
-        notifySubject: buildShareSubjectLine("jira", derivedJiraKey, displayTitle),
-      });
+      if (!hasSentNotifyRef.current) {
+        hasSentNotifyRef.current = true;
+        await sendCompletionNotify({
+          agentName: "JIRA Agent",
+          identifier: displayTitle,
+          notifySubject: buildShareSubjectLine("jira", derivedJiraKey, displayTitle),
+        });
+      }
     } catch (e) {
       setStatusMsg("Error: " + e.message);
     } finally {

@@ -359,9 +359,13 @@ export default function PRDAgent() {
 
   const fileRef   = useRef();
   const bottomRef = useRef();
+  const hasSentNotifyRef = useRef(false);
 
   useEffect(() => { loadHistory().then(setHistory); }, []);
-  useEffect(() => { bottomRef.current?.scrollIntoView({behavior:"smooth"}); }, [phase, prd, questions, progress, showFeedback]);
+  useEffect(() => {
+    if (phase === "done" && showFeedback) return;
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [phase, prd, questions, progress]);
   useEffect(() => { saveFeedbackMemoryLS(feedbackMemory); }, [feedbackMemory]);
 
   const readFile = f => new Promise(res=>{
@@ -563,11 +567,14 @@ export default function PRDAgent() {
         setPhase("done");
         setAllowAutoPublish(true);
         const jid = parseJiraIssueKey(jiraIssueKey) || parseJiraIssueKey(input);
-        await sendCompletionNotify({
-          agentName: "PRD Agent",
-          identifier: fullPrd.title || input.slice(0, 60) || "PRD",
-          notifySubject: buildShareSubjectLine("prd", jid, fullPrd.title || input.slice(0, 60) || "PRD"),
-        });
+        if (!hasSentNotifyRef.current) {
+          hasSentNotifyRef.current = true;
+          await sendCompletionNotify({
+            agentName: "PRD Agent",
+            identifier: fullPrd.title || input.slice(0, 60) || "PRD",
+            notifySubject: buildShareSubjectLine("prd", jid, fullPrd.title || input.slice(0, 60) || "PRD"),
+          });
+        }
       } else {
         setLoadingMsg("Generating clarifying questions…");
         const summary = Object.entries(sections).slice(0,3).map(([k,v])=>`${k}: ${String(v).slice(0,200)}`).join("\n");
@@ -619,11 +626,14 @@ export default function PRDAgent() {
         content: buildMd(refined),
       });
       setAllowAutoPublish(true);
-      await sendCompletionNotify({
-        agentName: "PRD Agent",
-        identifier: refined.title || input.slice(0, 60) || "PRD",
-        notifySubject: buildShareSubjectLine("prd", jidRefined, refined.title || "PRD"),
-      });
+      if (!hasSentNotifyRef.current) {
+        hasSentNotifyRef.current = true;
+        await sendCompletionNotify({
+          agentName: "PRD Agent",
+          identifier: refined.title || input.slice(0, 60) || "PRD",
+          notifySubject: buildShareSubjectLine("prd", jidRefined, refined.title || "PRD"),
+        });
+      }
     } catch(e) { setError("Error: "+e.message); setPhase("clarifying"); }
     setLoading(false); setLoadingMsg("");
   };

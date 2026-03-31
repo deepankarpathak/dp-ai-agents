@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useMemo } from "react";
 import { API_BASE } from "./config.js";
-import { loadPublishDefaults } from "./ConnectorsStatus.jsx";
+import { loadPublishDefaults, savePublishDefaults } from "./ConnectorsStatus.jsx";
 import { buildShareSubjectLine } from "./shareSubject.js";
 
 const panelStyle = {
@@ -26,7 +26,7 @@ const btnStyle = (primary = false) => ({
 });
 
 /**
- * Share (JIRA, Telegram, Email, Slack) + Score (GPT 5.4) for PRD / UAT / BRD success screens.
+ * Share (JIRA, Telegram, Email, Slack) + Score (OpenAI or Foundry LLM) for PRD / UAT / BRD / JIRA success screens.
  * @param {'prd'|'uat'|'brd'|'jira'} props.docType
  * @param {string} props.title - Document / J.display title
  * @param {string} props.content - Full markdown
@@ -39,7 +39,17 @@ export default function ShareAndScore({ docType, title, content, jiraKey = "", a
   const [score, setScore] = useState(null);
   const [scoreLoading, setScoreLoading] = useState(false);
   const [scoreError, setScoreError] = useState("");
-  const [publishSelected, setPublishSelected] = useState({ jira: true, telegram: true, email: true, slack: true });
+  const [scoreProvider, setScoreProvider] = useState(() =>
+    loadPublishDefaults().scoreProvider === "foundry" ? "foundry" : "openai"
+  );
+  const [scoreBackend, setScoreBackend] = useState({ openAi: true, foundry: false });
+  const [publishSelected, setPublishSelected] = useState({ jira: false, telegram: false, email: false, slack: false });
+
+  function persistScoreProvider(next) {
+    const n = next === "foundry" ? "foundry" : "openai";
+    setScoreProvider(n);
+    savePublishDefaults({ ...loadPublishDefaults(), scoreProvider: n });
+  }
   const [publishRunning, setPublishRunning] = useState(false);
   const [publishDone, setPublishDone] = useState(false);
 
@@ -58,6 +68,40 @@ export default function ShareAndScore({ docType, title, content, jiraKey = "", a
       ranAutoPublish.current = false;
     }
   }, [content]);
+
+  useEffect(() => {
+    const onDefaults = () => {
+      const s = loadPublishDefaults().scoreProvider;
+      if (s === "foundry" || s === "openai") setScoreProvider(s);
+    };
+    window.addEventListener("publish-defaults-changed", onDefaults);
+    return () => window.removeEventListener("publish-defaults-changed", onDefaults);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`${API_BASE}/api/config`)
+      .then((r) => r.json())
+      .then((d) => {
+        if (cancelled || !d) return;
+        setScoreBackend({
+          openAi: !!d.scoreOpenAiConfigured,
+          foundry: !!d.scoreFoundryConfigured,
+        });
+      })
+      .catch(() => {
+        if (!cancelled) setScoreBackend({ openAi: true, foundry: true });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    const { openAi, foundry } = scoreBackend;
+    if (scoreProvider === "openai" && !openAi && foundry) persistScoreProvider("foundry");
+    else if (scoreProvider === "foundry" && !foundry && openAi) persistScoreProvider("openai");
+  }, [scoreBackend.openAi, scoreBackend.foundry, scoreProvider]);
 
   useEffect(() => {
     if (!content || autoPublish.length === 0 || ranAutoPublish.current) return;
@@ -174,7 +218,12 @@ export default function ShareAndScore({ docType, title, content, jiraKey = "", a
   const handleScore = async () => {
     setScore(null); setScoreError(""); setScoreLoading(true);
     try {
-      const { data: d } = await apiJson("/api/score", { type: docType, content, title });
+      const { data: d } = await apiJson("/api/score", {
+        type: docType,
+        content,
+        title,
+        scoreProvider,
+      });
       if (d.success) setScore({ score: d.score, maxScore: d.maxScore ?? 10, rationale: d.rationale });
       else setScoreError(d.error || "Score failed");
     } catch (e) { setScoreError(e.message); }
@@ -256,9 +305,38 @@ export default function ShareAndScore({ docType, title, content, jiraKey = "", a
       )}
 
       {/* Score */}
+      <div style={{ marginBottom: 8 }}>
+        <div style={{ fontSize: 11, color: "#64748b", marginBottom: 6 }}>Score with:</div>
+        <select
+          value={scoreProvider}
+          onChange={(e) => persistScoreProvider(e.target.value)}
+          style={{
+            background: "#0B1220",
+            border: "1px solid #1E3A5F",
+            borderRadius: 8,
+            color: "#CBD5E1",
+            fontSize: 12,
+            padding: "6px 10px",
+            fontFamily: "inherit",
+            maxWidth: "100%",
+          }}
+        >
+          <option value="openai" disabled={!scoreBackend.openAi}>
+            OpenAI ({scoreBackend.openAi ? "OPENAI_API_KEY" : "not configured"})
+          </option>
+          <option value="foundry" disabled={!scoreBackend.foundry}>
+            Foundry / internal LLM ({scoreBackend.foundry ? "LLM_KEY_API + URL" : "not configured"})
+          </option>
+        </select>
+      </div>
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-        <button type="button" onClick={handleScore} disabled={scoreLoading} style={btnStyle(true)}>
-          {scoreLoading ? "Scoring…" : "Get score (GPT)"}
+        <button
+          type="button"
+          onClick={handleScore}
+          disabled={scoreLoading || (scoreProvider === "openai" ? !scoreBackend.openAi : !scoreBackend.foundry)}
+          style={btnStyle(true)}
+        >
+          {scoreLoading ? "Scoring…" : scoreProvider === "foundry" ? "Get score (Foundry)" : "Get score (OpenAI)"}
         </button>
         {score && (
           <span style={{ fontSize: 13, color: "#F59E0B", fontWeight: 700 }}>

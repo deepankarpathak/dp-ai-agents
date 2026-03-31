@@ -70,6 +70,49 @@ const LLM_URL = process.env.LLM_URL || "https://tfy.internal.ap-south-1.producti
 const LLM_MODEL = process.env.LLM_MODEL;
 const LLM_API_KEY = process.env.LLM_KEY_API || process.env.LLM_API_KEY;
 
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
+const SCORE_MODEL = process.env.SCORE_MODEL || "gpt-4o";
+
+function scoreFoundryBaseUrl() {
+  return String(process.env.SCORE_LLM_URL || LLM_URL || "").trim().replace(/\/$/, "");
+}
+
+function scoreFoundryModel() {
+  return String(process.env.SCORE_LLM_MODEL || LLM_MODEL || SCORE_MODEL).trim() || "gpt-4o";
+}
+
+/** Extract assistant text from OpenAI chat, Anthropic-style, or wrapped shapes. */
+function extractAssistantTextFromLlmPayload(parsed) {
+  if (parsed == null) return "";
+  if (typeof parsed === "string") return parsed;
+  const c0 = parsed.choices?.[0];
+  if (c0?.message?.content != null) return String(c0.message.content);
+  if (c0?.text != null) return String(c0.text);
+  const inner = parsed.data ?? parsed;
+  const c1 = inner?.choices?.[0];
+  if (c1?.message?.content != null) return String(c1.message.content);
+  const blocks = inner?.content;
+  if (Array.isArray(blocks)) {
+    return blocks
+      .map((b) => (typeof b === "string" ? b : b?.text != null ? String(b.text) : ""))
+      .filter(Boolean)
+      .join("");
+  }
+  if (inner?.output_text != null) return String(inner.output_text);
+  return "";
+}
+
+function parseScoreJsonFromModelOutput(raw) {
+  const s = String(raw || "")
+    .replace(/```json?\s*|\s*```/g, "")
+    .trim();
+  try {
+    return JSON.parse(s);
+  } catch {
+    return { score: 0, maxScore: 10, rationale: "Could not parse score from model." };
+  }
+}
+
 const JIRA_URL = (process.env.JIRA_URL || "").replace(/\/$/, "");
 /** Second Atlassian site (e.g. TPAP on mypaytm). Same JIRA_EMAIL / JIRA_TOKEN as primary unless you add overrides later. */
 const JIRA_URL_2 = (process.env.JIRA_URL_2 || process.env.JIRA_URL_SECONDARY || process.env.JIRA_URL_TPAP || "").replace(/\/$/, "");
@@ -360,6 +403,7 @@ app.post("/api/claude", async (req, res) => {
 
 app.get("/api/config", (req, res) => {
   const sites = listConfiguredJiraBases();
+  const foundryScoreUrl = scoreFoundryBaseUrl();
   res.json({
     anthropicConfigured: !!LLM_API_KEY,
     jiraConfigured: !!(JIRA_EMAIL && JIRA_TOKEN && sites.length > 0),
@@ -368,6 +412,8 @@ app.get("/api/config", (req, res) => {
     jiraSites: sites,
     jiraSecondaryProjectKeys: [...JIRA_SECONDARY_PROJECT_KEYS],
     jiraEmail: JIRA_EMAIL || "",
+    scoreOpenAiConfigured: !!OPENAI_API_KEY,
+    scoreFoundryConfigured: !!(LLM_API_KEY && foundryScoreUrl),
   });
 });
 
@@ -1174,7 +1220,30 @@ async function telegramApiSendMessage(chatId, textBody, parseMode) {
     }),
     ...(telegramHttpsAgent ? { agent: telegramHttpsAgent } : {}),
   });
-  const data = await r.json().catch(() => ({}));
+  let data = {};
+  try {
+    data = await r.json();
+  } catch {
+    data = {};
+  }
+  // #region agent log
+  fetch('http://127.0.0.1:7842/ingest/8fc1decb-c4f1-4183-ab20-ebd1f89b284b',{
+    method:'POST',
+    headers:{
+      'Content-Type':'application/json',
+      'X-Debug-Session-Id':'5fdef1'
+    },
+    body:JSON.stringify({
+      sessionId:'5fdef1',
+      runId:'post-fix',
+      hypothesisId:'T1',
+      location:'backend/server.js:1211',
+      message:'telegramApiSendMessage result',
+      data:{ status:r.status, ok:r.ok, hasDescription:!!data?.description, hasMessage:!!data?.message },
+      timestamp:Date.now()
+    })
+  }).catch(()=>{});
+  // #endregion
   return { ok: r.ok, data };
 }
 
@@ -1246,6 +1315,8 @@ app.post("/api/share/telegram", async (req, res) => {
     const { chatId, text, title } = req.body || {};
     if (!chatId || !text) return res.status(400).json({ success: false, error: "Missing chatId or text" });
     if (!TELEGRAM_BOT_TOKEN) return res.status(400).json({ success: false, error: "TELEGRAM_BOT_TOKEN not set in .env" });
+    const subjectPreview = title || (String(text).slice(0, 80) || "Telegram share");
+    console.log("[api/share/telegram] sending", { chatId, subject: subjectPreview });
     let chunks = markdownToTelegramChunks(String(text));
     if (title) {
       const prefix = `<b>${escapeTelegramHtml(title)}</b>\n\n`;
@@ -1256,6 +1327,7 @@ app.post("/api/share/telegram", async (req, res) => {
     for (const chunk of chunks) {
       const { ok, data } = await telegramApiSendMessage(chatId, chunk.slice(0, 4096), "HTML");
       if (!ok || !data.ok) {
+        console.error("[api/share/telegram] Telegram API error:", data?.description || data?.message || "unknown");
         return res.status(400).json({ success: false, error: data.description || data.message || "Telegram API error" });
       }
       lastId = data.result?.message_id;
@@ -1278,6 +1350,7 @@ app.post("/api/share/slack", async (req, res) => {
     const preview = String(title ? `${title}\n\n${text}` : text).slice(0, 500);
     const payload = { ...formatted, text: preview };
     if (channel) payload.channel = channel;
+    console.log("[api/share/slack] sending", { channel: channel || "default", subject: title || preview.slice(0, 80) });
     const r = await fetch(webhookUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1285,6 +1358,7 @@ app.post("/api/share/slack", async (req, res) => {
     });
     if (!r.ok) {
       const err = await r.text();
+      console.error("[api/share/slack] webhook failed:", r.status, String(err).slice(0, 400));
       return res.status(r.status).json({ success: false, error: err || "Slack webhook failed" });
     }
     res.json({ success: true });
@@ -1308,6 +1382,10 @@ app.post("/api/share/email", async (req, res) => {
     const md = title ? `## ${title}\n\n${text}` : String(text);
     const bodyText = title ? `${title}\n\n${text}` : text;
     const bodyHtml = markdownToEmailHtml(md);
+    console.log("[api/share/email] sending", {
+      to,
+      subject: subject || "AI Agents Output",
+    });
     await transporter.sendMail({
       from: process.env.EMAIL_FROM || process.env.EMAIL_USER || "noreply@local",
       to,
@@ -1317,46 +1395,113 @@ app.post("/api/share/email", async (req, res) => {
     });
     res.json({ success: true });
   } catch (err) {
+    console.error("[api/share/email] failed:", err.message || err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// ── Score (GPT 5.4 / configurable model) ─────────────────────────────────────
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
-const SCORE_MODEL = process.env.SCORE_MODEL || "gpt-4o";
-
+// ── Score (OpenAI or internal Foundry / LLM gateway) ─────────────────────────
 app.post("/api/score", async (req, res) => {
   try {
-    const { type, content, title } = req.body || {};
+    const { type, content, title, scoreProvider } = req.body || {};
     if (!type || !content) return res.status(400).json({ success: false, error: "Missing type (prd|uat|brd|jira) or content" });
-    if (!OPENAI_API_KEY) return res.status(400).json({ success: false, error: "OPENAI_API_KEY not set in .env for scoring" });
+    const provider = String(scoreProvider || "openai").toLowerCase() === "foundry" ? "foundry" : "openai";
     const docType =
       type === "uat" ? "UAT Signoff" : type === "brd" ? "BRD" : type === "jira" ? "JIRA ticket" : "PRD";
     const systemPrompt = `You are an expert reviewer. Score the following ${docType} document on a scale of 1-10 (10 = excellent). Consider: completeness, clarity, compliance with NPCI/UPI norms, structure, and actionability. Respond with ONLY a JSON object: { "score": number, "maxScore": 10, "rationale": "2-3 sentence explanation" }. No other text.`;
     const userContent = (title ? `Document: ${title}\n\n` : "") + String(content).slice(0, 12000);
-    const r = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-      },
-      body: JSON.stringify({
-        model: SCORE_MODEL,
-        messages: [{ role: "user", content: systemPrompt + "\n\n" + userContent }],
-        max_tokens: 400,
-      }),
-    });
-    const data = await r.json().catch(() => ({}));
-    if (data.error) return res.status(r.status || 500).json({ success: false, error: data.error.message || "OpenAI error" });
-    const raw = data.choices?.[0]?.message?.content || "";
-    let result;
-    try {
-      result = JSON.parse(raw.replace(/```json?\s*|\s*```/g, "").trim());
-    } catch (_) {
-      result = { score: 0, maxScore: 10, rationale: "Could not parse score from model." };
+    const combinedUserMessage = `${systemPrompt}\n\n${userContent}`;
+
+    if (provider === "openai") {
+      if (!OPENAI_API_KEY) {
+        return res.status(400).json({ success: false, error: "OPENAI_API_KEY not set in .env for OpenAI scoring" });
+      }
+      console.log("[api/score] provider=openai model=", SCORE_MODEL);
+      const r = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${OPENAI_API_KEY}`,
+        },
+        body: JSON.stringify({
+          model: SCORE_MODEL,
+          messages: [{ role: "user", content: combinedUserMessage }],
+          max_tokens: 400,
+        }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        const msg = data?.error?.message || data?.message || `HTTP ${r.status}`;
+        console.error("[api/score] OpenAI failed:", r.status, String(msg).slice(0, 400));
+        return res.status(r.status || 500).json({ success: false, error: msg || "OpenAI error" });
+      }
+      if (data.error) return res.status(r.status || 500).json({ success: false, error: data.error.message || "OpenAI error" });
+      const raw = data.choices?.[0]?.message?.content || "";
+      const result = parseScoreJsonFromModelOutput(raw);
+      return res.json({ success: true, scoreProvider: "openai", ...result });
     }
-    res.json({ success: true, ...result });
+
+    // Foundry / internal LLM (same gateway style as /api/generate)
+    if (!LLM_API_KEY) {
+      return res.status(400).json({
+        success: false,
+        error: "Foundry scoring requires LLM_KEY_API or LLM_API_KEY in .env",
+      });
+    }
+    const foundryUrl = scoreFoundryBaseUrl();
+    if (!foundryUrl) {
+      return res.status(400).json({
+        success: false,
+        error: "Set SCORE_LLM_URL or LLM_URL in .env for Foundry scoring",
+      });
+    }
+    const foundryModel = scoreFoundryModel();
+    const requestBody = {
+      model: foundryModel,
+      max_tokens: 400,
+      messages: [{ role: "user", content: combinedUserMessage }],
+    };
+    const doFoundryCall = (authMode) =>
+      fetch(foundryUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(authMode === "x-api-key" ? { "x-api-key": LLM_API_KEY } : { Authorization: `Bearer ${LLM_API_KEY}` }),
+        },
+        body: JSON.stringify(requestBody),
+      });
+    console.log("[api/score] provider=foundry url=", foundryUrl, "model=", foundryModel);
+    let authMode = "x-api-key";
+    let response = await doFoundryCall(authMode);
+    if (response.status === 401) {
+      authMode = "bearer";
+      response = await doFoundryCall(authMode);
+    }
+    const responseText = await response.text();
+    if (!response.ok) {
+      console.error("[api/score] Foundry failed:", response.status, responseText.slice(0, 600));
+      return res.status(response.status).json({
+        success: false,
+        error: `Foundry LLM error (${response.status}): ${responseText.slice(0, 200).replace(/\s+/g, " ")}`,
+      });
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(responseText);
+    } catch (e) {
+      console.error("[api/score] Foundry invalid JSON:", responseText.slice(0, 300));
+      return res.status(500).json({ success: false, error: "Invalid JSON from Foundry scoring gateway" });
+    }
+    const root = parsed && typeof parsed === "object" && parsed.data != null ? parsed.data : parsed;
+    const rawText = extractAssistantTextFromLlmPayload(root) || extractAssistantTextFromLlmPayload(parsed);
+    if (!rawText.trim()) {
+      console.error("[api/score] Foundry empty assistant text:", JSON.stringify(parsed).slice(0, 500));
+      return res.status(500).json({ success: false, error: "Could not read model text from Foundry response" });
+    }
+    const result = parseScoreJsonFromModelOutput(rawText);
+    return res.json({ success: true, scoreProvider: "foundry", ...result });
   } catch (err) {
+    console.error("[api/score] exception:", err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -1372,6 +1517,7 @@ app.post("/api/notify/complete", async (req, res) => {
         : `${agentName} — ${identifier} is done`;
     const body = `${subject}\n\nGenerated at ${new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })}`;
     const results = [];
+    console.log("[api/notify/complete] sending completion notification", { agentName, identifier, subject });
 
     // Email
     const emailTo = process.env.NOTIFY_EMAIL || process.env.EMAIL_USER || "";
@@ -1392,7 +1538,10 @@ app.post("/api/notify/complete", async (req, res) => {
           text: body,
         });
         results.push("email:ok");
-      } catch (e) { results.push("email:" + e.message); }
+      } catch (e) {
+        console.error("[api/notify/complete] email failed:", e.message || e);
+        results.push("email:" + e.message);
+      }
     }
 
     // Slack
@@ -1404,8 +1553,15 @@ app.post("/api/notify/complete", async (req, res) => {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ text: subject }),
         });
+        if (!r.ok) {
+          const txt = await r.text().catch(() => "");
+          console.error("[api/notify/complete] slack failed:", r.status, String(txt).slice(0, 300));
+        }
         results.push(r.ok ? "slack:ok" : "slack:failed");
-      } catch (e) { results.push("slack:" + e.message); }
+      } catch (e) {
+        console.error("[api/notify/complete] slack exception:", e.message || e);
+        results.push("slack:" + e.message);
+      }
     }
 
     // WhatsApp (Meta Business API)
@@ -1419,8 +1575,15 @@ app.post("/api/notify/complete", async (req, res) => {
           headers: { "Content-Type": "application/json", Authorization: `Bearer ${waToken}` },
           body: JSON.stringify({ messaging_product: "whatsapp", to: waRecipient, type: "text", text: { body: subject } }),
         });
+        if (!r.ok) {
+          const txt = await r.text().catch(() => "");
+          console.error("[api/notify/complete] whatsapp failed:", r.status, String(txt).slice(0, 300));
+        }
         results.push(r.ok ? "whatsapp:ok" : "whatsapp:failed");
-      } catch (e) { results.push("whatsapp:" + e.message); }
+      } catch (e) {
+        console.error("[api/notify/complete] whatsapp exception:", e.message || e);
+        results.push("whatsapp:" + e.message);
+      }
     }
 
     // Telegram
@@ -1429,8 +1592,17 @@ app.post("/api/notify/complete", async (req, res) => {
       if (tgChatId) {
         try {
           const { ok, data } = await telegramApiSendMessage(tgChatId, `<b>${escapeTelegramHtml(subject)}</b>`, "HTML");
+          if (!ok || !data?.ok) {
+            console.error(
+              "[api/notify/complete] telegram failed:",
+              data?.description || data?.message || "unknown error"
+            );
+          }
           results.push(ok && data.ok ? "telegram:ok" : "telegram:failed");
-        } catch (e) { results.push("telegram:" + e.message); }
+        } catch (e) {
+          console.error("[api/notify/complete] telegram exception:", e.message || e);
+          results.push("telegram:" + e.message);
+        }
       }
     }
 
