@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import { API_BASE, sendCompletionNotify } from "./config.js";
 import ShareAndScore from "./ShareAndScore.jsx";
-import { syncPublishDefaultJiraKey, loadPublishDefaults, syncPublishJiraSiteFromIssue } from "./ConnectorsStatus.jsx";
+import { syncPublishDefaultJiraKey, loadPublishDefaults, syncPublishJiraSiteFromIssue, getLlmProviderForRequest, getBedrockModelTierForRequest } from "./ConnectorsStatus.jsx";
 import { exportAgentOutput } from "./agentExport.js";
 import { buildShareSubjectLine } from "./shareSubject.js";
 
@@ -416,7 +416,7 @@ export default function PRDAgent() {
   const callAPI = async (messages, sys) => {
     const res = await fetch(`${API_BASE}/api/generate`,{
       method:"POST", headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({ model:model.id, max_tokens:8000, system:sys||BASE_SYSTEM, messages }),
+      body:JSON.stringify({ model:model.id, max_tokens:8000, system:sys||BASE_SYSTEM, messages, llmProvider: getLlmProviderForRequest(), bedrockModelTier: getBedrockModelTierForRequest() }),
     });
     const text = await res.text();
     let data;

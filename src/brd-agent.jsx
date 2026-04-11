@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import { API_BASE, sendCompletionNotify } from "./config.js";
 import ShareAndScore from "./ShareAndScore.jsx";
-import { syncPublishDefaultJiraKey, loadPublishDefaults, syncPublishJiraSiteFromIssue } from "./ConnectorsStatus.jsx";
+import { syncPublishDefaultJiraKey, loadPublishDefaults, syncPublishJiraSiteFromIssue, getLlmProviderForRequest, getBedrockModelTierForRequest } from "./ConnectorsStatus.jsx";
 import { exportAgentOutput } from "./agentExport.js";
 import { buildShareSubjectLine } from "./shareSubject.js";
 
@@ -111,7 +111,13 @@ async function callLLM(systemPrompt, userMessage, maxTokens = 8000) {
   const res = await fetch(`${API_BASE}/api/generate`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ system: systemPrompt, messages: [{ role: "user", content: userMessage }], max_tokens: maxTokens }),
+    body: JSON.stringify({
+      system: systemPrompt,
+      messages: [{ role: "user", content: userMessage }],
+      max_tokens: maxTokens,
+      llmProvider: getLlmProviderForRequest(),
+      bedrockModelTier: getBedrockModelTierForRequest(),
+    }),
   });
   const text = await res.text();
   let data;

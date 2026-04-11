@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import { API_BASE, sendCompletionNotify } from "./config.js";
 import ShareAndScore from "./ShareAndScore.jsx";
-import { syncPublishDefaultJiraKey, loadPublishDefaults, syncPublishJiraSiteFromIssue } from "./ConnectorsStatus.jsx";
+import { syncPublishDefaultJiraKey, loadPublishDefaults, syncPublishJiraSiteFromIssue, getLlmProviderForRequest, getBedrockModelTierForRequest } from "./ConnectorsStatus.jsx";
 import { exportAgentOutput } from "./agentExport.js";
 import { buildShareSubjectLine } from "./shareSubject.js";
 
@@ -563,6 +563,8 @@ export default function TestSentinel() {
         system: systemPrompt,
         messages: [{ role: "user", content: userMessage }],
         max_tokens: maxTokens,
+        llmProvider: getLlmProviderForRequest(),
+        bedrockModelTier: getBedrockModelTierForRequest(),
       }),
     });
     const text = await res.text();

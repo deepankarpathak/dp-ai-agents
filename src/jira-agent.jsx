@@ -1,7 +1,14 @@
 import { useEffect, useMemo, useState, useRef, useCallback } from "react";
 import { API_BASE, sendCompletionNotify } from "./config.js";
 import ShareAndScore from "./ShareAndScore.jsx";
-import { syncPublishDefaultJiraKey, loadPublishDefaults, syncPublishJiraSiteFromIssue, savePublishDefaults } from "./ConnectorsStatus.jsx";
+import {
+  syncPublishDefaultJiraKey,
+  loadPublishDefaults,
+  syncPublishJiraSiteFromIssue,
+  savePublishDefaults,
+  getLlmProviderForRequest,
+  getBedrockModelTierForRequest,
+} from "./ConnectorsStatus.jsx";
 import { exportAgentOutput } from "./agentExport.js";
 import { buildShareSubjectLine } from "./shareSubject.js";
 
@@ -221,6 +228,8 @@ async function callLLM(systemPrompt, userMessage, maxTokens, modelId) {
     model: modelId,
     messages: [{ role: "user", content: userMessage }],
     max_tokens: maxTokens,
+    llmProvider: getLlmProviderForRequest(),
+    bedrockModelTier: getBedrockModelTierForRequest(),
   });
   const payload = data.data ?? data;
   const blocks = payload?.content;
@@ -517,6 +526,7 @@ export default function JiraAgent() {
   /** History entry id used to persist linked JIRAs after create (set on generate or load). */
   const historyAnchorRef = useRef(null);
   const hasSentNotifyRef = useRef(false);
+  const [openSubtaskIndex, setOpenSubtaskIndex] = useState(null);
 
   const jiraLabelsForCreate = useMemo(() => jiraLabelsFromDomainIds(selectedDomains), [selectedDomains]);
   const notifyDomainLabelsForCreate = useMemo(() => domainDisplayNamesForNotify(selectedDomains), [selectedDomains]);
@@ -1084,12 +1094,30 @@ export default function JiraAgent() {
           <p style={{ fontSize: 12, color: "#64748b", marginBottom: 14 }}>
             Use <strong style={{ color: "#E2E8F0" }}>Create parent + sub-JIRAs</strong> to push all at once. Sub-task type must be enabled in JIRA; override in <code style={{ background: "#111827", padding: "2px 6px", borderRadius: 4 }}>.env</code> if needed.
           </p>
-          {subtasks.map((s, i) => (
-            <div key={i} style={{ border: "1px solid #1E293B", borderRadius: 10, padding: 14, marginBottom: 10, background: "#0B1220" }}>
-              <div style={{ fontSize: 13, fontWeight: 700, color: "#E2E8F0", marginBottom: 8 }}>{s.summary || `Subtask ${i + 1}`}</div>
-              <div style={{ fontSize: 12, color: "#94A3B8" }}>{(s.description || "").slice(0, 400)}{(s.description || "").length > 400 ? "…" : ""}</div>
-            </div>
-          ))}
+          {subtasks.map((s, i) => {
+            const fullText = s.description || s.body || s.summary || "";
+            const isOpen = openSubtaskIndex === i;
+            return (
+              <div
+                key={i}
+                style={{ border: "1px solid #1E293B", borderRadius: 10, padding: 14, marginBottom: 10, background: "#0B1220", cursor: "pointer" }}
+                onClick={() => setOpenSubtaskIndex(isOpen ? null : i)}
+              >
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: "#E2E8F0" }}>{s.summary || `Subtask ${i + 1}`}</div>
+                  <span style={{ fontSize: 11, color: "#64748b" }}>{isOpen ? "Hide" : "View full details"}</span>
+                </div>
+                {isOpen ? (
+                  <div style={{ fontSize: 12, color: "#CBD5E1", lineHeight: 1.6 }}>{renderJiraMarkdown(fullText)}</div>
+                ) : (
+                  <div style={{ fontSize: 12, color: "#94A3B8" }}>
+                    {fullText.slice(0, 400)}
+                    {fullText.length > 400 ? "…" : ""}
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
       )}
 
@@ -1162,6 +1190,36 @@ export default function JiraAgent() {
       </div>
 
       <ShareAndScore docType="jira" title={displayTitle} content={resultMd} jiraKey={derivedJiraKey} jiraShareSite={jiraWriteSite} autoPublish={[]} />
+
+      {subtasks.length > 0 && (
+        <div style={{ marginTop: 20 }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: "#E5E7EB", marginBottom: 8 }}>Get score for sub-JIRAs</div>
+          {subtasks.map((s, i) => (
+            <div
+              key={i}
+              style={{
+                marginBottom: 16,
+                border: "1px solid #1E293B",
+                borderRadius: 12,
+                padding: 16,
+                background: "#020617",
+              }}
+            >
+              <div style={{ fontSize: 12, fontWeight: 600, color: "#CBD5E1", marginBottom: 6 }}>
+                {s.summary || `Sub-JIRA ${i + 1}`}
+              </div>
+              <ShareAndScore
+                docType="jira"
+                title={`${displayTitle} – ${s.summary || `Sub-JIRA ${i + 1}`}`}
+                content={s.description || s.body || s.summary || ""}
+                jiraKey=""
+                jiraShareSite={jiraWriteSite}
+                autoPublish={[]}
+              />
+            </div>
+          ))}
+        </div>
+      )}
     </>
   );
 
