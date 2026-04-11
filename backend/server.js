@@ -13,6 +13,13 @@ import { extractTextFromPDF, extractTextFromPDFBuffer } from "./pdfParser.js";
 import FormData from "form-data";
 import { retrieve as ragRetrieve } from "./rag/retrieve.js";
 import {
+  converseBedrock,
+  isBedrockConfigured,
+  runBedrockReadinessProbe,
+  rerunBedrockReadinessProbe,
+  bedrockHealth,
+} from "./bedrockClient.js";
+import {
   markdownToEmailHtml,
   markdownToJiraAdf,
   markdownToSlackPayload,
@@ -72,6 +79,189 @@ const LLM_API_KEY = process.env.LLM_KEY_API || process.env.LLM_API_KEY;
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const SCORE_MODEL = process.env.SCORE_MODEL || "gpt-4o";
+const GEMINI_API_KEY = String(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || "").trim();
+const GEMINI_MODEL = String(process.env.GEMINI_MODEL || "gemini-2.0-flash").trim();
+
+/** Cached LLM probes for Connectors (startup + optional refresh). */
+const llmProviderHealth = {
+  foundry: { configured: false, ok: null, error: null, at: null },
+  openai: { configured: false, ok: null, error: null, at: null },
+  gemini: { configured: false, ok: null, error: null, at: null },
+};
+
+const PROBE_TIMEOUT_MS = 20000;
+
+async function probeFoundryLlm() {
+  llmProviderHealth.foundry.configured = !!(LLM_API_KEY && LLM_URL);
+  if (!LLM_API_KEY || !LLM_URL) {
+    llmProviderHealth.foundry.ok = false;
+    llmProviderHealth.foundry.error = "LLM_KEY_API / LLM_API_KEY or LLM_URL not set";
+    llmProviderHealth.foundry.at = Date.now();
+    return;
+  }
+  const requestBody = {
+    model: LLM_MODEL || SCORE_MODEL || "gpt-4o",
+    max_tokens: 32,
+    messages: [{ role: "user", content: "Reply with exactly: OK" }],
+  };
+  const doCall = (authMode) =>
+    fetch(LLM_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(authMode === "x-api-key" ? { "x-api-key": LLM_API_KEY } : { Authorization: `Bearer ${LLM_API_KEY}` }),
+      },
+      body: JSON.stringify(requestBody),
+      signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+    });
+  try {
+    let response = await doCall("x-api-key");
+    if (response.status === 401) response = await doCall("bearer");
+    const responseText = await response.text();
+    if (!response.ok) {
+      llmProviderHealth.foundry.ok = false;
+      llmProviderHealth.foundry.error = `HTTP ${response.status}: ${responseText.slice(0, 200).replace(/\s+/g, " ")}`;
+      llmProviderHealth.foundry.at = Date.now();
+      return;
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(responseText);
+    } catch (e) {
+      llmProviderHealth.foundry.ok = false;
+      llmProviderHealth.foundry.error = "Invalid JSON from gateway";
+      llmProviderHealth.foundry.at = Date.now();
+      return;
+    }
+    const text = extractAssistantTextFromLlmPayload(parsed).trim();
+    if (!text) {
+      llmProviderHealth.foundry.ok = false;
+      llmProviderHealth.foundry.error = "Gateway returned empty assistant text";
+      llmProviderHealth.foundry.at = Date.now();
+      return;
+    }
+    llmProviderHealth.foundry.ok = true;
+    llmProviderHealth.foundry.error = null;
+    llmProviderHealth.foundry.at = Date.now();
+  } catch (e) {
+    llmProviderHealth.foundry.ok = false;
+    llmProviderHealth.foundry.error = e?.message || String(e);
+    llmProviderHealth.foundry.at = Date.now();
+  }
+}
+
+async function probeOpenAiLlm() {
+  llmProviderHealth.openai.configured = !!OPENAI_API_KEY;
+  if (!OPENAI_API_KEY) {
+    llmProviderHealth.openai.ok = false;
+    llmProviderHealth.openai.error = "OPENAI_API_KEY not set";
+    llmProviderHealth.openai.at = Date.now();
+    return;
+  }
+  try {
+    const r = await fetch("https://api.openai.com/v1/models?limit=1", {
+      headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },
+      signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      const msg = data?.error?.message || data?.message || `HTTP ${r.status}`;
+      llmProviderHealth.openai.ok = false;
+      llmProviderHealth.openai.error = String(msg).slice(0, 300);
+      llmProviderHealth.openai.at = Date.now();
+      return;
+    }
+    llmProviderHealth.openai.ok = true;
+    llmProviderHealth.openai.error = null;
+    llmProviderHealth.openai.at = Date.now();
+  } catch (e) {
+    llmProviderHealth.openai.ok = false;
+    llmProviderHealth.openai.error = e?.message || String(e);
+    llmProviderHealth.openai.at = Date.now();
+  }
+}
+
+async function probeGeminiLlm() {
+  llmProviderHealth.gemini.configured = !!GEMINI_API_KEY;
+  if (!GEMINI_API_KEY) {
+    llmProviderHealth.gemini.ok = false;
+    llmProviderHealth.gemini.error = "GEMINI_API_KEY or GOOGLE_API_KEY not set (Gemini not wired for /api/generate)";
+    llmProviderHealth.gemini.at = Date.now();
+    return;
+  }
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(GEMINI_MODEL)}:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`;
+  try {
+    const r = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ contents: [{ parts: [{ text: "Say OK" }] }] }),
+      signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      const msg = data?.error?.message || data?.message || JSON.stringify(data).slice(0, 200);
+      llmProviderHealth.gemini.ok = false;
+      llmProviderHealth.gemini.error = `HTTP ${r.status}: ${msg}`;
+      llmProviderHealth.gemini.at = Date.now();
+      return;
+    }
+    const parts = data?.candidates?.[0]?.content?.parts;
+    const text = Array.isArray(parts) ? parts.map((p) => p?.text || "").join("") : "";
+    if (!String(text).trim()) {
+      llmProviderHealth.gemini.ok = false;
+      llmProviderHealth.gemini.error = "Empty response from Gemini API";
+      llmProviderHealth.gemini.at = Date.now();
+      return;
+    }
+    llmProviderHealth.gemini.ok = true;
+    llmProviderHealth.gemini.error = null;
+    llmProviderHealth.gemini.at = Date.now();
+  } catch (e) {
+    llmProviderHealth.gemini.ok = false;
+    llmProviderHealth.gemini.error = e?.message || String(e);
+    llmProviderHealth.gemini.at = Date.now();
+  }
+}
+
+function buildLlmProvidersPayload() {
+  const bedrock = {
+    id: "bedrock",
+    label: "AWS Bedrock",
+    configured: isBedrockConfigured(),
+    ok: bedrockHealth.ok,
+    error: bedrockHealth.error,
+    at: bedrockHealth.at,
+  };
+  const foundry = {
+    id: "foundry",
+    label: "Foundry",
+    configured: llmProviderHealth.foundry.configured,
+    ok: llmProviderHealth.foundry.ok,
+    error: llmProviderHealth.foundry.error,
+    at: llmProviderHealth.foundry.at,
+  };
+  const openai = {
+    id: "openai",
+    label: "OpenAI",
+    configured: llmProviderHealth.openai.configured,
+    ok: llmProviderHealth.openai.ok,
+    error: llmProviderHealth.openai.error,
+    at: llmProviderHealth.openai.at,
+  };
+  const gemini = {
+    id: "gemini",
+    label: "Gemini",
+    configured: llmProviderHealth.gemini.configured,
+    ok: llmProviderHealth.gemini.ok,
+    error: llmProviderHealth.gemini.error,
+    at: llmProviderHealth.gemini.at,
+  };
+  return [bedrock, foundry, openai, gemini];
+}
+
+async function runNonBedrockLlmProbes() {
+  await Promise.all([probeFoundryLlm(), probeOpenAiLlm(), probeGeminiLlm()]);
+}
 
 function scoreFoundryBaseUrl() {
   return String(process.env.SCORE_LLM_URL || LLM_URL || "").trim().replace(/\/$/, "");
@@ -272,6 +462,21 @@ const JIRA_DEV_ASSIGNEE_FIELD_ID = String(process.env.JIRA_DEV_ASSIGNEE_FIELD_ID
 const JIRA_DEV_ASSIGNEE_SINGLE_USER_OBJECT =
   String(process.env.JIRA_DEV_ASSIGNEE_SINGLE_USER_OBJECT || "").toLowerCase() === "true";
 
+// Optional defaults for specific custom fields used on parent + sub-JIRAs (e.g. Yes/No flags).
+// Example in .env:
+//   JIRA_CF_10377_DEFAULT=No
+//   JIRA_CF_10378_DEFAULT=No
+const JIRA_CF_10377_DEFAULT = String(process.env.JIRA_CF_10377_DEFAULT || "").trim();
+const JIRA_CF_10378_DEFAULT = String(process.env.JIRA_CF_10378_DEFAULT || "").trim();
+
+function jiraSelectOptionFromEnv(raw) {
+  const v = String(raw || "").trim();
+  if (!v) return null;
+  // If it looks like an id (digits), send { id } otherwise send { value }.
+  if (/^\d+$/.test(v)) return { id: v };
+  return { value: v };
+}
+
 if (JIRA_DEV_ASSIGNEE_SINGLE_USER_OBJECT) {
   console.warn(
     "[jira] JIRA_DEV_ASSIGNEE_SINGLE_USER_OBJECT=true — Dev Assignee is sent as a single object. If JIRA returns \"data was not an array\", remove this line from .env (multi-user fields need [{ id }])."
@@ -303,25 +508,73 @@ app.use(express.json({ limit: "10mb" }));
 
 app.post("/api/generate", async (req, res) => {
   try {
-    if (!LLM_API_KEY) {
-      return res.status(500).json({
-        success: false,
-        error: "MISSING_API_KEY",
-        message: "Set LLM_KEY_API (preferred) or LLM_API_KEY in .env",
-      });
-    }
     const incomingMessages = Array.isArray(req.body?.messages) ? req.body.messages : null;
     let incomingSystem = typeof req.body?.system === "string" ? req.body.system : null;
     const incomingMaxTokens = typeof req.body?.max_tokens === "number" ? req.body.max_tokens : 8000;
     const messages = incomingMessages?.length ? incomingMessages : [{ role: "user", content: req.body?.prompt || "Generate PRD" }];
-    const userText = (messages.find((m) => m.role === "user")?.content || req.body?.prompt || "").slice(0, 4000);
+    const rawUserContent = messages.find((m) => m.role === "user")?.content;
+    const userText = (
+      typeof rawUserContent === "string"
+        ? rawUserContent
+        : rawUserContent != null
+          ? JSON.stringify(rawUserContent)
+          : req.body?.prompt || ""
+    ).slice(0, 4000);
     const ragChunks = await ragRetrieve(userText, 5);
     if (ragChunks.length > 0) {
       const ragContext = "\n\n[Reference context from NPCI/UPI/PRD docs – use where relevant]\n" + ragChunks.join("\n\n");
       incomingSystem = (incomingSystem || "") + ragContext;
     }
+
+    const llmProvider = String(req.body?.llmProvider || process.env.LLM_PROVIDER_DEFAULT || "aws").toLowerCase() === "foundry" ? "foundry" : "aws";
+    const modelFromBody = typeof req.body?.model === "string" && req.body.model.trim() ? req.body.model.trim() : null;
+    const bedrockModelTier =
+      typeof req.body?.bedrockModelTier === "string" && req.body.bedrockModelTier.trim()
+        ? req.body.bedrockModelTier.trim()
+        : null;
+
+    if (llmProvider === "aws") {
+      if (!isBedrockConfigured()) {
+        return res.status(503).json({
+          success: false,
+          error: "BEDROCK_NOT_CONFIGURED",
+          message:
+            "AWS Bedrock is not configured. Set BEDROCK_INVOKE_URL + BEDROCK_API_KEY (or BED_LLM_KEY), or native Bedrock: BEDROCK_MODEL_ID, AWS_REGION, credentials / BEDROCK_USE_DEFAULT_CREDENTIALS. See .env.example.",
+        });
+      }
+      console.log(
+        "[api/generate] provider=aws",
+        bedrockModelTier ? `tier=${bedrockModelTier}` : "tier(default)",
+        modelFromBody ? `model(body)=${modelFromBody}` : ""
+      );
+      try {
+        const data = await converseBedrock({
+          messages,
+          system: incomingSystem || undefined,
+          maxTokens: incomingMaxTokens,
+          modelId: modelFromBody || undefined,
+          bedrockModelTier,
+        });
+        return res.json({ success: true, data, llmProvider: "aws" });
+      } catch (err) {
+        console.error("[api/generate] bedrock error:", err.message || err);
+        return res.status(500).json({
+          success: false,
+          error: "BEDROCK_ERROR",
+          message: err.message || String(err),
+        });
+      }
+    }
+
+    if (!LLM_API_KEY) {
+      return res.status(500).json({
+        success: false,
+        error: "MISSING_API_KEY",
+        message: "Set LLM_KEY_API (preferred) or LLM_API_KEY in .env for Foundry, or switch LLM provider to AWS in Connectors.",
+      });
+    }
     const requestBody = {
-      model: LLM_MODEL,
+      model: modelFromBody || LLM_MODEL,
       max_tokens: incomingMaxTokens,
       ...(incomingSystem ? { system: incomingSystem } : {}),
       messages,
@@ -356,7 +609,8 @@ app.post("/api/generate", async (req, res) => {
     } catch (err) {
       return res.status(500).json({ success: false, error: "INVALID_JSON_FROM_LLM", message: responseText });
     }
-    res.json({ success: true, data: parsed });
+    console.log("[api/generate] provider=foundry");
+    res.json({ success: true, data: parsed, llmProvider: "foundry" });
   } catch (error) {
     console.error("SERVER ERROR:", error);
     res.status(500).json({ success: false, error: "SERVER_EXCEPTION", message: error.message });
@@ -365,15 +619,39 @@ app.post("/api/generate", async (req, res) => {
 
 app.post("/api/claude", async (req, res) => {
   try {
-    if (!LLM_API_KEY) {
-      return res.status(500).json({ error: { message: "Set LLM_KEY_API or LLM_API_KEY in .env" } });
-    }
     const incomingMessages = Array.isArray(req.body?.messages) ? req.body.messages : null;
     const incomingSystem = typeof req.body?.system === "string" ? req.body.system : null;
     const incomingMaxTokens = typeof req.body?.max_tokens === "number" ? req.body.max_tokens : 4000;
     const messages = incomingMessages?.length ? incomingMessages : [{ role: "user", content: req.body?.prompt || "" }];
+    const llmProvider = String(req.body?.llmProvider || process.env.LLM_PROVIDER_DEFAULT || "aws").toLowerCase() === "foundry" ? "foundry" : "aws";
+    const modelFromBody = typeof req.body?.model === "string" && req.body.model.trim() ? req.body.model.trim() : null;
+    const bedrockModelTier =
+      typeof req.body?.bedrockModelTier === "string" && req.body.bedrockModelTier.trim()
+        ? req.body.bedrockModelTier.trim()
+        : null;
+
+    if (llmProvider === "aws") {
+      if (!isBedrockConfigured()) {
+        return res.status(503).json({
+          error: { message: "AWS Bedrock not configured — see .env.example (HTTP gateway or native SDK vars)." },
+        });
+      }
+      console.log("[api/claude] provider=aws", bedrockModelTier ? `tier=${bedrockModelTier}` : "");
+      const data = await converseBedrock({
+        messages,
+        system: incomingSystem || undefined,
+        maxTokens: incomingMaxTokens,
+        modelId: modelFromBody || undefined,
+        bedrockModelTier,
+      });
+      return res.json(data);
+    }
+
+    if (!LLM_API_KEY) {
+      return res.status(500).json({ error: { message: "Set LLM_KEY_API or LLM_API_KEY in .env for Foundry" } });
+    }
     const requestBody = {
-      model: req.body?.model || LLM_MODEL,
+      model: modelFromBody || LLM_MODEL,
       max_tokens: incomingMaxTokens,
       ...(incomingSystem ? { system: incomingSystem } : {}),
       messages,
@@ -394,6 +672,7 @@ app.post("/api/claude", async (req, res) => {
       return res.status(response.status).json({ error: { message: responseText } });
     }
     const parsed = JSON.parse(responseText);
+    console.log("[api/claude] provider=foundry");
     res.json(parsed);
   } catch (err) {
     console.error("BRD /api/claude error:", err);
@@ -405,7 +684,9 @@ app.get("/api/config", (req, res) => {
   const sites = listConfiguredJiraBases();
   const foundryScoreUrl = scoreFoundryBaseUrl();
   res.json({
-    anthropicConfigured: !!LLM_API_KEY,
+    anthropicConfigured: !!LLM_API_KEY || isBedrockConfigured(),
+    llmBedrockConfigured: isBedrockConfigured(),
+    llmFoundryConfigured: !!(LLM_API_KEY && LLM_URL),
     jiraConfigured: !!(JIRA_EMAIL && JIRA_TOKEN && sites.length > 0),
     jiraUrl: JIRA_URL || "",
     jiraUrl2: JIRA_URL_2 || "",
@@ -518,6 +799,9 @@ app.post("/api/extract-context-file", upload.single("file"), async (req, res) =>
 app.get("/api/connectors/status", (req, res) => {
   const sites = listConfiguredJiraBases();
   res.json({
+    llmBedrockConfigured: isBedrockConfigured(),
+    llmFoundryConfigured: !!(LLM_API_KEY && LLM_URL),
+    llmProviders: buildLlmProvidersPayload(),
     jira: !!(JIRA_EMAIL && JIRA_TOKEN && sites.length > 0),
     jiraSites: sites,
     jiraSecondaryProjectKeys: [...JIRA_SECONDARY_PROJECT_KEYS],
@@ -526,6 +810,15 @@ app.get("/api/connectors/status", (req, res) => {
     email: !!(process.env.EMAIL_SMTP_HOST || process.env.EMAIL_API_KEY),
     telegram: !!(process.env.TELEGRAM_BOT_TOKEN),
   });
+});
+
+app.post("/api/connectors/llm-probes", async (req, res) => {
+  try {
+    await Promise.all([rerunBedrockReadinessProbe(), runNonBedrockLlmProbes()]);
+    res.json({ success: true, llmProviders: buildLlmProvidersPayload() });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err?.message || String(err) });
+  }
 });
 
 app.get("/api/jira-test", async (req, res) => {
@@ -1134,7 +1427,7 @@ app.post("/api/jira/create-with-subtasks", async (req, res) => {
     const parentSummary = String(parent.summary).trim().slice(0, 255);
     if (!parentSummary) return res.status(400).json({ success: false, error: "Parent summary is empty" });
     const parentMd = String(parent.description);
-    const parentFieldsBase = mergeLabelsIntoJiraFields(
+    let parentFieldsBase = mergeLabelsIntoJiraFields(
       {
         project: { key: cleanProjectKey },
         summary: parentSummary,
@@ -1146,6 +1439,21 @@ app.post("/api/jira/create-with-subtasks", async (req, res) => {
       },
       labels
     );
+    const cf10377Parent = jiraSelectOptionFromEnv(JIRA_CF_10377_DEFAULT);
+    const cf10378Parent = jiraSelectOptionFromEnv(JIRA_CF_10378_DEFAULT);
+    if (cf10377Parent) parentFieldsBase.customfield_10377 = cf10377Parent;
+    if (cf10378Parent) parentFieldsBase.customfield_10378 = cf10378Parent;
+    console.log(
+      `${logP} parent CF defaults:`,
+      JSON.stringify(
+        {
+          customfield_10377: parentFieldsBase.customfield_10377 || null,
+          customfield_10378: parentFieldsBase.customfield_10378 || null,
+        },
+        null,
+        2
+      )
+    );
     const createdParent = await jiraCreateIssueWithMarkdownDescription(parentFieldsBase, parentMd, `${logP} parent`, jiraBase);
     const parentKey = createdParent.key || "";
     const createdSubs = [];
@@ -1154,7 +1462,7 @@ app.post("/api/jira/create-with-subtasks", async (req, res) => {
       const sum = String(st?.summary || "").trim().slice(0, 255);
       if (!sum) continue;
       const bodyMd = String(st?.description || st?.body || "").trim() || sum;
-      const subFieldsBase = mergeLabelsIntoJiraFields(
+      let subFieldsBase = mergeLabelsIntoJiraFields(
         {
           project: { key: cleanProjectKey },
           parent: { key: parentKey },
@@ -1166,6 +1474,21 @@ app.post("/api/jira/create-with-subtasks", async (req, res) => {
           ...assigneeFields,
         },
         labels
+      );
+      const cf10377Sub = jiraSelectOptionFromEnv(JIRA_CF_10377_DEFAULT);
+      const cf10378Sub = jiraSelectOptionFromEnv(JIRA_CF_10378_DEFAULT);
+      if (cf10377Sub) subFieldsBase.customfield_10377 = cf10377Sub;
+      if (cf10378Sub) subFieldsBase.customfield_10378 = cf10378Sub;
+      console.log(
+        `${logP} sub CF defaults for ${sum.slice(0, 80)}:`,
+        JSON.stringify(
+          {
+            customfield_10377: subFieldsBase.customfield_10377 || null,
+            customfield_10378: subFieldsBase.customfield_10378 || null,
+          },
+          null,
+          2
+        )
       );
       try {
         const subData = await jiraCreateIssueWithMarkdownDescription(subFieldsBase, bodyMd, `${logP} sub`, jiraBase);
@@ -1226,24 +1549,6 @@ async function telegramApiSendMessage(chatId, textBody, parseMode) {
   } catch {
     data = {};
   }
-  // #region agent log
-  fetch('http://127.0.0.1:7842/ingest/8fc1decb-c4f1-4183-ab20-ebd1f89b284b',{
-    method:'POST',
-    headers:{
-      'Content-Type':'application/json',
-      'X-Debug-Session-Id':'5fdef1'
-    },
-    body:JSON.stringify({
-      sessionId:'5fdef1',
-      runId:'post-fix',
-      hypothesisId:'T1',
-      location:'backend/server.js:1211',
-      message:'telegramApiSendMessage result',
-      data:{ status:r.status, ok:r.ok, hasDescription:!!data?.description, hasMessage:!!data?.message },
-      timestamp:Date.now()
-    })
-  }).catch(()=>{});
-  // #endregion
   return { ok: r.ok, data };
 }
 
@@ -1624,4 +1929,6 @@ if (NODE_ENV === "production" && fs.existsSync(buildPath)) {
 
 app.listen(PORT, () => {
   console.log(`AI agents backend (ai-agents-backend) running on port ${PORT} [${NODE_ENV}]`);
+  void runBedrockReadinessProbe();
+  void runNonBedrockLlmProbes();
 });
