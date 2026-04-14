@@ -269,6 +269,14 @@ export default function BRDAgent() {
 
   useEffect(() => { saveHistoryLS(history); }, [history]);
   useEffect(() => { saveFeedbackMemory(feedbackMemory); }, [feedbackMemory]);
+  useEffect(() => {
+    const onImport = () => {
+      setHistory(loadHistory());
+      setFeedbackMemory(loadFeedbackMemory());
+    };
+    window.addEventListener("agent-localstorage-imported", onImport);
+    return () => window.removeEventListener("agent-localstorage-imported", onImport);
+  }, []);
 
   // ── JIRA fetch ──
   const handleFetchJira = async () => {

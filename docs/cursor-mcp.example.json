@@ -26,6 +26,13 @@
         "run",
         "main.py"
       ]
+    },
+    "superset-mcp": {
+      "command": "/bin/bash",
+      "args": [
+        "-lc",
+        "exec /Users/YOUR_USER/prd-agent/scripts/run-superset-mcp.sh"
+      ]
     }
   }
 }

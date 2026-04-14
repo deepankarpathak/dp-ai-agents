@@ -166,24 +166,37 @@ function saveFeedbackMemoryLS(m) { try { localStorage.setItem(PRD_FEEDBACK_MEM_K
 
 function getStorage() {
   if (typeof window === "undefined") return null;
-  if (window.storage && typeof window.storage.get === "function" && typeof window.storage.set === "function") {
-    return {
-      get: (key) => Promise.resolve(window.storage.get(key)),
-      set: (key, value) => Promise.resolve(window.storage.set(key, value)),
-    };
-  }
+  // Always use browser localStorage with { value } shape. A global `window.storage` from
+  // another tool can return a different shape and silently empty PRD history.
   return {
     get: (key) => Promise.resolve({ value: localStorage.getItem(key) }),
     set: (key, value) => Promise.resolve(localStorage.setItem(key, value)),
   };
 }
 
+function historyEntryTimestampMs(h) {
+  if (!h || typeof h !== "object") return NaN;
+  if (typeof h.createdAt === "number" && !Number.isNaN(h.createdAt)) return h.createdAt;
+  if (typeof h.updatedAt === "number" && !Number.isNaN(h.updatedAt)) return h.updatedAt;
+  if (h.ts) {
+    const t = Date.parse(String(h.ts));
+    if (!Number.isNaN(t)) return t;
+  }
+  const id = h.id;
+  if (id != null && id !== "") {
+    const n = typeof id === "number" ? id : parseInt(String(id), 10);
+    if (!Number.isNaN(n) && n > 1e11) return n;
+  }
+  return NaN;
+}
+
 function filterHistoryByRetention(entries, maxDays = HISTORY_MAX_DAYS) {
   if (!Array.isArray(entries)) return [];
   const cutoff = Date.now() - maxDays * 24 * 60 * 60 * 1000;
   return entries.filter((h) => {
-    const ts = typeof h.createdAt === "number" ? h.createdAt : parseInt(h.id, 10);
-    return !Number.isNaN(ts) && ts >= cutoff;
+    const ts = historyEntryTimestampMs(h);
+    if (Number.isNaN(ts)) return true;
+    return ts >= cutoff;
   });
 }
 
@@ -362,6 +375,14 @@ export default function PRDAgent() {
   const hasSentNotifyRef = useRef(false);
 
   useEffect(() => { loadHistory().then(setHistory); }, []);
+  useEffect(() => {
+    const onImport = () => {
+      loadHistory().then(setHistory);
+      setFeedbackMemory(loadFeedbackMemory());
+    };
+    window.addEventListener("agent-localstorage-imported", onImport);
+    return () => window.removeEventListener("agent-localstorage-imported", onImport);
+  }, []);
   useEffect(() => {
     if (phase === "done" && showFeedback) return;
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });

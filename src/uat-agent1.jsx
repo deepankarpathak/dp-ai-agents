@@ -143,30 +143,58 @@ Be specific and concise.`;
 
 // ── History (persisted to localStorage for online/offline) ───────────────────
 const UAT_HISTORY_KEY = "uat-sentinel-history-v1";
+const UAT_HISTORY_MAX_DAYS = 60;
+
+function uatEntryTimeMs(h) {
+  if (!h?.ts) return NaN;
+  const t = new Date(h.ts).getTime();
+  return Number.isNaN(t) ? NaN : t;
+}
+
+function filterUATHistoryByRetention(arr, maxDays = UAT_HISTORY_MAX_DAYS) {
+  const cutoff = Date.now() - maxDays * 24 * 60 * 60 * 1000;
+  return (Array.isArray(arr) ? arr : []).filter((h) => {
+    const t = uatEntryTimeMs(h);
+    if (Number.isNaN(t)) return true;
+    return t > cutoff;
+  });
+}
+
+function nextUATHistoryId(arr) {
+  const nums = (Array.isArray(arr) ? arr : []).map((h) => {
+    const id = h?.id;
+    return typeof id === "number" && !Number.isNaN(id) ? id : 0;
+  });
+  return (nums.length ? Math.max(...nums) : 0) + 1;
+}
+
 function loadHistoryFromLS() {
   try {
     const raw = localStorage.getItem(UAT_HISTORY_KEY);
     if (!raw) return [];
     const arr = JSON.parse(raw);
-    const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
-    return (Array.isArray(arr) ? arr : []).filter((h) => new Date(h.ts).getTime() > cutoff);
+    return filterUATHistoryByRetention(Array.isArray(arr) ? arr : []);
   } catch {
     return [];
   }
 }
 let _history = loadHistoryFromLS();
-let _hid = Math.max(1, ..._history.map((h) => h.id || 0)) + 1;
+let _hid = nextUATHistoryId(_history);
 function saveToHistory(entry) {
   const record = { id: _hid++, ...entry, ts: new Date().toISOString() };
   _history.unshift(record);
-  const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
-  _history = _history.filter((h) => new Date(h.ts).getTime() > cutoff);
+  _history = filterUATHistoryByRetention(_history);
   try {
     localStorage.setItem(UAT_HISTORY_KEY, JSON.stringify(_history.slice(0, 50)));
   } catch {}
   return record;
 }
 function getHistory() { return _history; }
+
+function reloadUATHistoryModuleFromLS() {
+  _history = loadHistoryFromLS();
+  _hid = nextUATHistoryId(_history);
+}
 
 const UAT_FEEDBACK_MEM_KEY = "uat-feedback-memory-v1";
 function loadUATFeedbackMemory() { try { return JSON.parse(localStorage.getItem(UAT_FEEDBACK_MEM_KEY) || "[]"); } catch { return []; } }
@@ -483,6 +511,17 @@ export default function TestSentinel() {
   const [jiraFetchError, setJiraFetchError] = useState("");
 
   useEffect(() => { saveUATFeedbackMemoryLS(feedbackMemory); }, [feedbackMemory]);
+
+  const [, setHistoryImportBump] = useState(0);
+  useEffect(() => {
+    const onImport = () => {
+      reloadUATHistoryModuleFromLS();
+      setFeedbackMemory(loadUATFeedbackMemory());
+      setHistoryImportBump((n) => n + 1);
+    };
+    window.addEventListener("agent-localstorage-imported", onImport);
+    return () => window.removeEventListener("agent-localstorage-imported", onImport);
+  }, []);
 
   const jiraRef = useRef(); const testRef = useRef(); const docsRef = useRef(); const fbRef = useRef();
   const hasSentNotifyRef = useRef(false);

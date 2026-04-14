@@ -40,3 +40,4 @@ The app reads `JIRA_URL`, `JIRA_EMAIL`, `JIRA_TOKEN` from `prd-agent/.env`. Curs
 - [mcp-atlassian](https://github.com/sooperset/mcp-atlassian)
 - [redash-mcp](https://github.com/suthio/redash-mcp)
 - [whatsapp-mcp](https://github.com/lharries/whatsapp-mcp)
+- [aptro/superset-mcp](https://github.com/aptro/superset-mcp) — Apache Superset (SQL Lab, dashboards, datasets). Installed in this repo via `scripts/install-superset-mcp.sh`; run with `scripts/run-superset-mcp.sh` and add `superset-mcp` to `~/.cursor/mcp.json` as in `docs/cursor-mcp.example.json`. Set `SUPERSET_BASE_URL`, `SUPERSET_USERNAME`, `SUPERSET_PASSWORD` in `~/.cursor/mcp-secrets.env`.

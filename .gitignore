@@ -8,7 +8,7 @@
 /prd-output
 /backend/prd-output
 /backend/agent-exports
-
+/Query_Agent
 
 
 # testing
@@ -30,6 +30,9 @@
 *.pem
 # Local MCP secrets (never copy into repo)
 **/mcp-secrets.env
+
+# aptro/superset-mcp — install with scripts/install-superset-mcp.sh (clone + venv)
+/third_party/superset-mcp/
 
 # backend (when run from backend/)
 backend/node_modules

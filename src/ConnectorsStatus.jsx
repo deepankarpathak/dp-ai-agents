@@ -1,5 +1,10 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { API_BASE } from "./config.js";
+import {
+  AGENT_LOCAL_STORAGE_KEYS,
+  applyAgentLocalStorageImport,
+  downloadAgentBackupJson,
+} from "./agentStorageBackup.js";
 
 const PUBLISH_DEFAULTS_KEY = "publish-defaults-v1";
 const PUBLISH_DEFAULTS_EMPTY = {
@@ -95,12 +100,21 @@ export default function ConnectorsStatus() {
   useEffect(() => { if (open) setPublishDefaults(loadPublishDefaults()); }, [open]);
   const [publishSaved, setPublishSaved] = useState(false);
   const [llmProbeLoading, setLlmProbeLoading] = useState(false);
+  const [backendUnreachable, setBackendUnreachable] = useState(false);
+  const [backupMsg, setBackupMsg] = useState("");
+  const importFileRef = useRef(null);
 
   const fetchStatus = useCallback(() => {
     fetch(`${API_BASE}/api/connectors/status`)
-      .then((r) => r.json())
+      .then((r) => {
+        setBackendUnreachable(!r.ok);
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      })
       .then((data) => setStatus(data))
-      .catch(() => {});
+      .catch(() => {
+        setBackendUnreachable(true);
+      });
   }, []);
 
   useEffect(() => { fetchStatus(); }, [fetchStatus]);
@@ -173,6 +187,115 @@ export default function ConnectorsStatus() {
             </div>
             <div style={{ fontSize: 12, color: "#64748b", marginBottom: 20, lineHeight: 1.6 }}>
               Connectors are configured via environment variables in your <code style={{ background: "#1e293b", padding: "2px 6px", borderRadius: 4, color: "#93c5fd" }}>.env</code> file. Restart the server after making changes.
+            </div>
+
+            {backendUnreachable ? (
+              <div
+                style={{
+                  marginBottom: 16,
+                  padding: 12,
+                  borderRadius: 10,
+                  border: "1px solid #7f1d1d",
+                  background: "rgba(69, 10, 10, 0.5)",
+                  color: "#fecaca",
+                  fontSize: 12,
+                  lineHeight: 1.5,
+                }}
+              >
+                <strong style={{ color: "#fff" }}>Cannot reach API</strong> at{" "}
+                <code style={{ color: "#fde68a" }}>{API_BASE || "(see REACT_APP_API_URL)"}</code>. Start the backend:{" "}
+                <code style={{ color: "#a7f3d0" }}>npm run start:backend</code> or <code style={{ color: "#a7f3d0" }}>npm run dev</code>.
+              </div>
+            ) : null}
+
+            <div style={{ marginBottom: 16, padding: 14, background: "#1e293b", borderRadius: 12, border: "1px solid #334155" }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: "#e2e8f0", marginBottom: 8 }}>
+                PRD / UAT / BRD / JIRA — browser history
+              </div>
+              <p style={{ fontSize: 11, color: "#64748b", margin: "0 0 10px", lineHeight: 1.5 }}>
+                History is stored in <strong style={{ color: "#94a3b8" }}>localStorage</strong> for this site only.{" "}
+                <code style={{ color: "#93c5fd" }}>localhost</code> and <code style={{ color: "#93c5fd" }}>127.0.0.1</code> are{" "}
+                <strong>different</strong> — opening the app on a new URL looks like an empty history. Export from the old URL and import here to restore.
+              </p>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setBackupMsg("");
+                    try {
+                      downloadAgentBackupJson();
+                      setBackupMsg("Download started (JSON file).");
+                    } catch (e) {
+                      setBackupMsg(String(e?.message || e));
+                    }
+                  }}
+                  style={{
+                    padding: "6px 12px",
+                    borderRadius: 8,
+                    border: "1px solid #475569",
+                    background: "#0f172a",
+                    color: "#93c5fd",
+                    fontSize: 11,
+                    fontWeight: 600,
+                    cursor: "pointer",
+                    fontFamily: "inherit",
+                  }}
+                >
+                  Export history (download JSON)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => importFileRef.current?.click()}
+                  style={{
+                    padding: "6px 12px",
+                    borderRadius: 8,
+                    border: "1px solid #475569",
+                    background: "#0f172a",
+                    color: "#a7f3d0",
+                    fontSize: 11,
+                    fontWeight: 600,
+                    cursor: "pointer",
+                    fontFamily: "inherit",
+                  }}
+                >
+                  Import history…
+                </button>
+                <input
+                  ref={importFileRef}
+                  type="file"
+                  accept="application/json,.json"
+                  style={{ display: "none" }}
+                  onChange={async (ev) => {
+                    const f = ev.target.files?.[0];
+                    ev.target.value = "";
+                    if (!f) return;
+                    setBackupMsg("Reading…");
+                    try {
+                      const text = await f.text();
+                      const data = JSON.parse(text);
+                      const n = applyAgentLocalStorageImport(data);
+                      setBackupMsg(`Imported ${n} key(s). Reloading…`);
+                      try {
+                        window.dispatchEvent(
+                          new CustomEvent("agent-localstorage-imported", { detail: { keys: AGENT_LOCAL_STORAGE_KEYS } }),
+                        );
+                        window.dispatchEvent(new CustomEvent("publish-defaults-changed", { detail: loadPublishDefaults() }));
+                      } catch {
+                        /* ignore */
+                      }
+                      setTimeout(() => window.location.reload(), 400);
+                    } catch (e) {
+                      setBackupMsg(`Import failed: ${e?.message || e}`);
+                    }
+                  }}
+                />
+              </div>
+              <p style={{ fontSize: 10, color: "#64748b", margin: "8px 0 0" }}>
+                Keys: {AGENT_LOCAL_STORAGE_KEYS.join(", ")}
+              </p>
+              {backupMsg ? (
+                <p style={{ fontSize: 11, color: "#a7f3d0", margin: "8px 0 0" }}>{backupMsg}</p>
+              ) : null}
             </div>
 
             <div style={{ marginBottom: 16, padding: 14, background: "#1e293b", borderRadius: 12, border: "1px solid #334155" }}>

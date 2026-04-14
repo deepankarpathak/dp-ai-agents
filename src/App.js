@@ -3,12 +3,15 @@ import PRDAgent from "./prd-agent-v7.jsx";
 import TestSentinel from "./uat-agent1.jsx";
 import BRDAgent from "./brd-agent.jsx";
 import JiraAgent from "./jira-agent.jsx";
+import AnalystAgentTab from "./analyst-agent.jsx";
 import ConnectorsStatus from "./ConnectorsStatus.jsx";
+import BackendWarningBanner from "./BackendWarningBanner.jsx";
 
 const TAB_PRD = "prd";
 const TAB_UAT = "uat";
 const TAB_BRD = "brd";
 const TAB_JIRA = "jira";
+const TAB_ANALYST = "analyst";
 
 function App() {
   const [activeTab, setActiveTab] = useState(TAB_PRD);
@@ -97,12 +100,31 @@ function App() {
         >
           BRD Agent
         </button>
+        <button
+          type="button"
+          onClick={() => setActiveTab(TAB_ANALYST)}
+          style={{
+            padding: "8px 20px",
+            margin: 0,
+            border: "none",
+            borderBottom: activeTab === TAB_ANALYST ? "2px solid #22d3ee" : "2px solid transparent",
+            background: activeTab === TAB_ANALYST ? "#1e293b" : "transparent",
+            color: activeTab === TAB_ANALYST ? "#f8fafc" : "#64748b",
+            fontSize: 13,
+            fontWeight: 600,
+            cursor: "pointer",
+          }}
+        >
+          Analyst Agent
+        </button>
 
         {/* Connectors status — shared across all agents */}
         <div style={{ marginLeft: "auto" }}>
           <ConnectorsStatus />
         </div>
       </div>
+
+      <BackendWarningBanner />
 
       <div style={{ flex: 1, display: activeTab === TAB_PRD ? "block" : "none" }}>
         <PRDAgent />
@@ -115,6 +137,9 @@ function App() {
       </div>
       <div style={{ flex: 1, display: activeTab === TAB_JIRA ? "block" : "none" }}>
         <JiraAgent />
+      </div>
+      <div style={{ flex: 1, display: activeTab === TAB_ANALYST ? "block" : "none" }}>
+        <AnalystAgentTab />
       </div>
     </div>
   );

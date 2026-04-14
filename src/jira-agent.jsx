@@ -566,6 +566,12 @@ export default function JiraAgent() {
     return () => window.removeEventListener("publish-defaults-changed", onDefaults);
   }, []);
 
+  useEffect(() => {
+    const onImport = () => setHistory(loadHistory());
+    window.addEventListener("agent-localstorage-imported", onImport);
+    return () => window.removeEventListener("agent-localstorage-imported", onImport);
+  }, []);
+
   const resolvedDevAssignee = useMemo(
     () => devAssignee.trim() || loadPublishDefaults().jiraDevAssignee?.trim() || undefined,
     [devAssignee]
