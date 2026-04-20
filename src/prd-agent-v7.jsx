@@ -1,9 +1,10 @@
 import { useState, useRef, useEffect } from "react";
 import { API_BASE, sendCompletionNotify } from "./config.js";
 import ShareAndScore from "./ShareAndScore.jsx";
-import { syncPublishDefaultJiraKey, loadPublishDefaults, syncPublishJiraSiteFromIssue, getLlmProviderForRequest, getBedrockModelTierForRequest } from "./ConnectorsStatus.jsx";
+import { syncPublishDefaultJiraKey, loadPublishDefaults, syncPublishJiraSiteFromIssue, getLlmProviderForRequest, getLlmDisabledForRequest, getBedrockModelTierForRequest } from "./ConnectorsStatus.jsx";
 import { exportAgentOutput } from "./agentExport.js";
 import { buildShareSubjectLine } from "./shareSubject.js";
+import { buildAgentPrefaceContext } from "./agentContextPipeline.js";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 const MODELS = [
@@ -373,6 +374,8 @@ export default function PRDAgent() {
   const fileRef   = useRef();
   const bottomRef = useRef();
   const hasSentNotifyRef = useRef(false);
+  const latestPrefaceRef = useRef("");
+  const [contextStage, setContextStage] = useState(null);
 
   useEffect(() => { loadHistory().then(setHistory); }, []);
   useEffect(() => {
@@ -395,6 +398,20 @@ export default function PRDAgent() {
     r.onerror=()=>res(`[Could not read: ${f.name}]`);
     r.readAsText(f);
   });
+
+  const preparePreface = async (reqSnippet) => {
+    const histLines = history.slice(0, 4).map(
+      (h) => `PRD: ${h.prd?.title || "Untitled"} — ${(h.requirement || "").slice(0, 180)}`
+    );
+    const convLines = (convHistory || []).slice(-8).map((m) => `${m.role}: ${String(m.content || "").slice(0, 220)}`);
+    return buildAgentPrefaceContext({
+      apiBase: API_BASE,
+      query: reqSnippet,
+      historyLines: histLines,
+      convLines: convLines.filter(Boolean),
+      onStep: (s) => setContextStage(s),
+    });
+  };
 
   function parseJiraIssueKey(input) {
     const s = (input || "").trim();
@@ -434,10 +451,20 @@ export default function PRDAgent() {
     setJiraFetchLoading(false);
   };
 
-  const callAPI = async (messages, sys) => {
+  const callAPI = async (messages, sys, opts = {}) => {
+    const prefaceContext = typeof opts.prefaceContext === "string" ? opts.prefaceContext.trim() : "";
     const res = await fetch(`${API_BASE}/api/generate`,{
       method:"POST", headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({ model:model.id, max_tokens:8000, system:sys||BASE_SYSTEM, messages, llmProvider: getLlmProviderForRequest(), bedrockModelTier: getBedrockModelTierForRequest() }),
+      body:JSON.stringify({
+        model:model.id,
+        max_tokens:8000,
+        system:sys||BASE_SYSTEM,
+        messages,
+        llmProvider: getLlmProviderForRequest(),
+        llmDisabled: getLlmDisabledForRequest(),
+        bedrockModelTier: getBedrockModelTierForRequest(),
+        ...(prefaceContext ? { prefaceContext } : {}),
+      }),
     });
     const text = await res.text();
     let data;
@@ -461,13 +488,13 @@ export default function PRDAgent() {
     return blocks.filter(b=>b.type==="text").map(b=>b.text).join("");
   };
 
-  const generateInBatches = async (req) => {
+  const generateInBatches = async (req, prefaceContext = "") => {
     let combined = {};
     for (let i=0; i<BATCHES.length; i++) {
       const batch = BATCHES[i];
       setLoadingMsg(`Generating batch ${i+1}/${BATCHES.length}: ${batch.map(k=>PRD_SECTIONS.find(s=>s.key===k)?.icon).join(" ")} …`);
       setProgress({ done:i, total:BATCHES.length });
-      const raw = await callAPI([{ role:"user", content:sectionPrompt(batch, req) }]);
+      const raw = await callAPI([{ role:"user", content:sectionPrompt(batch, req) }], undefined, { prefaceContext });
       let parsed;
       try {
         parsed = repairJSON(raw);
@@ -498,7 +525,14 @@ export default function PRDAgent() {
     try {
       let req = input.trim();
       for (const f of files) req += "\n\n" + await readFile(f);
-      const raw = await callAPI([{ role:"user", content:`REQUIREMENT:\n${req.slice(0,800)}\n\n${DOMAIN_BOUNDARY_PROMPT}` }], BASE_SYSTEM);
+      let pf = "";
+      try {
+        pf = await preparePreface(req);
+        latestPrefaceRef.current = pf;
+      } finally {
+        setContextStage(null);
+      }
+      const raw = await callAPI([{ role:"user", content:`REQUIREMENT:\n${req.slice(0,800)}\n\n${DOMAIN_BOUNDARY_PROMPT}` }], BASE_SYSTEM, { prefaceContext: pf });
       let parsed = { needsClarification: false, questions: [] };
       try { parsed = repairJSON(raw); } catch(_) {}
       if (parsed.needsClarification && Array.isArray(parsed.questions) && parsed.questions.length > 0) {
@@ -506,7 +540,7 @@ export default function PRDAgent() {
         setDomainAnswers(parsed.questions.map(()=>""));
         setPreFeedbackPhase("domain_input");
       } else {
-        await runTermCheck(req, "");
+        await runTermCheck(req, "", pf);
       }
     } catch(e) { setError("Error: "+e.message); setPreFeedbackPhase("idle"); }
     setLoading(false); setLoadingMsg("");
@@ -518,13 +552,14 @@ export default function PRDAgent() {
     setPreFeedbackPhase("term_check"); setLoading(true); setLoadingMsg("Checking terminology ambiguities…");
     let req = input.trim();
     for (const f of files) req += "\n\n" + await readFile(f);
-    await runTermCheck(req, ctx);
+    await runTermCheck(req, ctx, latestPrefaceRef.current);
     setLoading(false); setLoadingMsg("");
   };
 
-  const runTermCheck = async (req, domainCtx) => {
+  const runTermCheck = async (req, domainCtx, prefaceContext = "") => {
     try {
-      const raw = await callAPI([{ role:"user", content:`REQUIREMENT:\n${req.slice(0,800)}\n\n${TERMINOLOGY_PROMPT}` }], BASE_SYSTEM);
+      const pf = typeof prefaceContext === "string" && prefaceContext.trim() ? prefaceContext : latestPrefaceRef.current || "";
+      const raw = await callAPI([{ role:"user", content:`REQUIREMENT:\n${req.slice(0,800)}\n\n${TERMINOLOGY_PROMPT}` }], BASE_SYSTEM, { prefaceContext: pf });
       let parsed = { needsClarification: false, terms: [] };
       try { parsed = repairJSON(raw); } catch(_) {}
       if (parsed.needsClarification && Array.isArray(parsed.terms) && parsed.terms.length > 0) {
@@ -564,13 +599,21 @@ export default function PRDAgent() {
       if (preFeedbackCtx.trim()) req += "\n\nPRE-GENERATION CONTEXT:\n" + preFeedbackCtx;
       if (feedbackMemory.length > 0) req += "\n\nREMEMBERED FEEDBACK FROM PREVIOUS PRDs (apply these improvements):\n" + feedbackMemory.map(f => `- ${f}`).join("\n");
 
+      let pf = "";
+      try {
+        pf = await preparePreface(req);
+        latestPrefaceRef.current = pf;
+      } finally {
+        setContextStage(null);
+      }
+
       setLoadingMsg("Setting up document metadata…");
-      const metaRaw = await callAPI([{ role:"user", content:`For this UPI Switch requirement, return ONLY: {"title":"...(max 8 words)...","version":"v1.0"}\n\nRequirement: ${req.slice(0,500)}` }]);
+      const metaRaw = await callAPI([{ role:"user", content:`For this UPI Switch requirement, return ONLY: {"title":"...(max 8 words)...","version":"v1.0"}\n\nRequirement: ${req.slice(0,500)}` }], undefined, { prefaceContext: pf });
       let meta = { title:"UPI Switch PRD", version:"v1.0" };
       try { meta={ ...meta, ...repairJSON(metaRaw) }; } catch(_) {}
       setPrd(meta);
 
-      const sections = await generateInBatches(req);
+      const sections = await generateInBatches(req, pf);
       const fullPrd  = { ...meta, ...sections };
       setPrd(fullPrd);
       await persistToHistory(fullPrd, req);
@@ -603,7 +646,7 @@ export default function PRDAgent() {
           { role:"user", content:`PRD summary:\n${summary}\n\nOriginal requirement: ${req.slice(0,400)}` },
           { role:"assistant", content:"PRD sections generated." },
           { role:"user", content:CLARIFY_PROMPT },
-        ]);
+        ], undefined, { prefaceContext: pf });
         let qs=[]; try{ qs=repairJSON(qRaw); if(!Array.isArray(qs))qs=[]; }catch(_){}
         setQuestions(qs);
         setConvHistory([{ role:"user", content:req },{ role:"assistant", content:JSON.stringify(sections) }]);
@@ -622,11 +665,17 @@ export default function PRDAgent() {
       const ansText = questions.map((q,i)=>answers[i]?.trim()?`Q: ${q}\nA: ${answers[i]}`:null).filter(Boolean).join("\n\n");
       const clarBlock = [ansText, hasOther ? `OTHER FEEDBACK:\n${otherFeedback.trim()}` : ""].filter(Boolean).join("\n\n---\n\n");
       const req = convHistory[0]?.content||input;
+      let pf = "";
+      try {
+        pf = await preparePreface(req);
+      } finally {
+        setContextStage(null);
+      }
       let refined = { ...prd };
       for (let i=0; i<BATCHES.length; i++) {
         setLoadingMsg(`Refining batch ${i+1}/${BATCHES.length}…`);
         setProgress({ done:i, total:BATCHES.length });
-        const raw = await callAPI([{ role:"user", content:sectionPrompt(BATCHES[i], `${req}\n\nCLARIFICATIONS:\n${clarBlock}`) }]);
+        const raw = await callAPI([{ role:"user", content:sectionPrompt(BATCHES[i], `${req}\n\nCLARIFICATIONS:\n${clarBlock}`) }], undefined, { prefaceContext: pf });
         let parsed; try{ parsed=repairJSON(raw); }catch{ parsed={}; }
         refined = { ...refined, ...parsed };
         setPrd({ ...refined });
@@ -675,12 +724,19 @@ export default function PRDAgent() {
     const currentPrdText = PRD_SECTIONS.map(s => `[${s.key}]\n${prd[s.key]||""}`).join("\n\n");
 
     try {
+      const reqSnip = convHistory[0]?.content || input;
+      let pf = "";
+      try {
+        pf = await preparePreface(reqSnip);
+      } finally {
+        setContextStage(null);
+      }
       let improved = { ...prd };
       for (let i=0; i<BATCHES.length; i++) {
         setLoadingMsg(`Improving batch ${i+1}/${BATCHES.length}…`);
         setProgress({ done:i, total:BATCHES.length });
         const improvPrompt = `You have an existing PRD. Apply the following feedback instructions to improve it.\n\nFEEDBACK TO APPLY:\n${combined}\n\nEXISTING PRD SECTIONS (for context):\n${currentPrdText.slice(0,12000)}\n\n${sectionPrompt(BATCHES[i], convHistory[0]?.content||input)}`;
-        const raw = await callAPI([{ role:"user", content:improvPrompt }]);
+        const raw = await callAPI([{ role:"user", content:improvPrompt }], undefined, { prefaceContext: pf });
         let parsed; try{ parsed=repairJSON(raw); }catch{ parsed={}; }
         improved = { ...improved, ...parsed };
         setPrd({ ...improved });
@@ -967,6 +1023,17 @@ export default function PRDAgent() {
 
           {error && <div style={{ marginTop:10, padding:"8px 12px", background:"#EF444411", border:"1px solid #EF444433", borderRadius:8, color:"#FCA5A5", fontSize:12 }}>{error}</div>}
 
+          {contextStage && (
+            <div style={{ marginTop:10, padding:"10px 14px", background:"#0C1A2E", border:"1px solid #1E3A5F", borderRadius:10, display:"flex", alignItems:"center", gap:10, fontSize:12, color:"#93C5FD" }}>
+              <Spinner color="#38BDF8" />
+              <div>
+                <div style={{ fontWeight:700, color:"#E0F2FE" }}>Context pipeline</div>
+                <div style={{ fontSize:11, color:"#64748B", marginTop:2 }}>{contextStage.label}</div>
+              </div>
+              <span style={{ marginLeft:"auto", fontSize:10, color:"#475569", textTransform:"uppercase", letterSpacing:0.6 }}>{contextStage.step}</span>
+            </div>
+          )}
+
           <div style={{ marginTop:16, display:"flex", justifyContent:"flex-end" }}>
             <button onClick={handleGenerate} disabled={loading||phase==="done"} className="hov"
               style={{ background:loading?"#1E293B":"linear-gradient(135deg,#F59E0B,#EF4444)", border:"none", borderRadius:10, padding:"11px 28px", color:loading?"#475569":"#0B1120", fontSize:14, fontWeight:700, cursor:loading?"not-allowed":"pointer", display:"flex", alignItems:"center", gap:8 }}>
@@ -986,7 +1053,7 @@ export default function PRDAgent() {
                 <div style={{ fontSize:14, fontWeight:700, color:"#C4B5FD" }}>Clarify Domain Boundaries</div>
                 <div style={{ fontSize:11, color:"#475569" }}>Help assign ownership correctly across Switch / TPAP / PSP / PG / NPCI</div>
               </div>
-              <button onClick={async()=>{ setPreFeedbackPhase("term_check"); setLoading(true); setLoadingMsg("Checking terminology…"); let req=input.trim(); await runTermCheck(req,""); setLoading(false); setLoadingMsg(""); }}
+              <button onClick={async()=>{ setPreFeedbackPhase("term_check"); setLoading(true); setLoadingMsg("Checking terminology…"); let req=input.trim(); for (const f of files) req += "\n\n" + await readFile(f); await runTermCheck(req,"", latestPrefaceRef.current); setLoading(false); setLoadingMsg(""); }}
                 style={{ marginLeft:"auto", background:"none", border:"1px solid #334155", borderRadius:8, padding:"5px 12px", color:"#475569", fontSize:11, cursor:"pointer" }}>Skip →</button>
             </div>
             {domainQuestions.map((q,i)=>(

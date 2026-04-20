@@ -1,9 +1,10 @@
 import { useState, useRef, useEffect } from "react";
 import { API_BASE, sendCompletionNotify } from "./config.js";
 import ShareAndScore from "./ShareAndScore.jsx";
-import { syncPublishDefaultJiraKey, loadPublishDefaults, syncPublishJiraSiteFromIssue, getLlmProviderForRequest, getBedrockModelTierForRequest } from "./ConnectorsStatus.jsx";
+import { syncPublishDefaultJiraKey, loadPublishDefaults, syncPublishJiraSiteFromIssue, getLlmProviderForRequest, getLlmDisabledForRequest, getBedrockModelTierForRequest } from "./ConnectorsStatus.jsx";
 import { exportAgentOutput } from "./agentExport.js";
 import { buildShareSubjectLine } from "./shareSubject.js";
+import { buildAgentPrefaceContext } from "./agentContextPipeline.js";
 
 // ── Domains (Feedback 2) ─────────────────────────────────────────────────────
 const DOMAINS = [
@@ -107,7 +108,8 @@ function loadFeedbackMemory() { try { return JSON.parse(localStorage.getItem(FEE
 function saveFeedbackMemory(m) { try { localStorage.setItem(FEEDBACK_MEM_KEY, JSON.stringify(m.slice(0, 20))); } catch {} }
 
 // ── LLM call (same API as PRD/UAT) ──────────────────────────────────────────
-async function callLLM(systemPrompt, userMessage, maxTokens = 8000) {
+async function callLLM(systemPrompt, userMessage, maxTokens = 8000, prefaceContext = "") {
+  const pc = typeof prefaceContext === "string" ? prefaceContext.trim() : "";
   const res = await fetch(`${API_BASE}/api/generate`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -116,7 +118,9 @@ async function callLLM(systemPrompt, userMessage, maxTokens = 8000) {
       messages: [{ role: "user", content: userMessage }],
       max_tokens: maxTokens,
       llmProvider: getLlmProviderForRequest(),
+      llmDisabled: getLlmDisabledForRequest(),
       bedrockModelTier: getBedrockModelTierForRequest(),
+      ...(pc ? { prefaceContext: pc } : {}),
     }),
   });
   const text = await res.text();
@@ -262,6 +266,7 @@ export default function BRDAgent() {
   // Auto-publish after generation (session option)
   const [autoPublishChannels, setAutoPublishChannels] = useState({ jira: false, telegram: false, email: false, slack: false });
   const [allowAutoPublish, setAllowAutoPublish] = useState(false);
+  const [contextStage, setContextStage] = useState(null);
 
   const fileRef = useRef();
   const feedbackFileRef = useRef();
@@ -311,6 +316,20 @@ export default function BRDAgent() {
     e.target.value = "";
   };
 
+  const loadPreface = async (queryText) => {
+    const histLines = history.slice(0, 4).map((h) => `BRD: ${h.subject || "Untitled"} — ${h.jiraId || ""}`);
+    try {
+      return await buildAgentPrefaceContext({
+        apiBase: API_BASE,
+        query: queryText,
+        historyLines: histLines,
+        onStep: (s) => setContextStage(s),
+      });
+    } finally {
+      setContextStage(null);
+    }
+  };
+
   // ── Build context ──
   const buildContext = () => {
     let ctx = `Feature: ${subject}\nDomain: ${DOMAINS.find((d) => d.id === domain)?.label || domain}\nJIRA ID: ${jiraId || "N/A"}\n\nDescription:\n${description || "(Not provided)"}\n\nAcceptance Criteria:\n${ac || "(Not provided)"}`;
@@ -328,7 +347,8 @@ export default function BRDAgent() {
       setStatusMsg("Analyzing inputs & generating questions…");
       try {
         const ctx = buildContext();
-        const raw = await callLLM(CLARIFY_SYSTEM, ctx, 1000);
+        const pf = await loadPreface(ctx.slice(0, 3000));
+        const raw = await callLLM(CLARIFY_SYSTEM, ctx, 1000, pf);
         let qs = [];
         try { qs = JSON.parse(raw.replace(/```json|```/g, "").trim()); } catch { qs = []; }
         if (!Array.isArray(qs) || qs.length === 0) qs = ["What NPCI circular mandates this change?", "Which error codes should be returned?", "How should in-flight transactions be handled?", "What monitoring alerts should trigger rollback?", "Which domains/services are affected?", "How does this interact with UPI Lite or AutoPay?"];
@@ -350,7 +370,8 @@ export default function BRDAgent() {
       let ctx = buildContext();
       const qaCtx = questions.length > 0 ? "\n\nClarification Q&A:\n" + questions.map((q, i) => answers[i] ? `Q: ${q}\nA: ${answers[i]}` : "").filter(Boolean).join("\n\n") : "";
       ctx += qaCtx + extraCtx;
-      const raw = await callLLM(BRD_SYSTEM, ctx, 8000);
+      const pf = await loadPreface(ctx.slice(0, 3000));
+      const raw = await callLLM(BRD_SYSTEM, ctx, 8000, pf);
       setBrdRaw(raw);
       const entry = { subject: subject || "Untitled", domain: DOMAINS.find((d) => d.id === domain)?.label || domain, jiraId, date: new Date().toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" }), brd: raw };
       setHistory((prev) => [entry, ...prev].slice(0, 50));
@@ -397,7 +418,8 @@ export default function BRDAgent() {
     setLoading(true); setStatusMsg("Improving BRD with feedback…");
     try {
       const improvePrompt = `You have an existing BRD. Apply the following feedback to improve it.\n\nFEEDBACK:\n${feedbackText}\n\nEXISTING BRD:\n${brdRaw.slice(0, 24000)}\n\nGenerate the FULL improved 24-section BRD. Apply all feedback. Return the complete BRD in markdown. Do NOT truncate or shorten any section.`;
-      const improved = await callLLM(BRD_SYSTEM, improvePrompt, 16000);
+      const pf = await loadPreface(improvePrompt.slice(0, 3000));
+      const improved = await callLLM(BRD_SYSTEM, improvePrompt, 16000, pf);
       setBrdRaw(improved);
       const newMem = [...feedbackMemory, feedbackText.trim().slice(0, 200)].slice(-20);
       setFeedbackMemory(newMem);
@@ -473,6 +495,16 @@ export default function BRDAgent() {
       <div style={{ maxWidth: 920, margin: "0 auto", padding: "24px 20px 100px" }}>
 
         {error && <div style={{ marginBottom: 16, padding: "10px 14px", background: "rgba(255,95,95,0.1)", border: "1px solid rgba(255,95,95,0.3)", borderRadius: 10, color: C.red, fontSize: 12 }}>{error}</div>}
+        {contextStage && (
+          <div style={{ marginBottom: 16, padding: "10px 14px", background: "#0C1A2E", border: "1px solid #1E3A5F", borderRadius: 10, display: "flex", alignItems: "center", gap: 10, fontSize: 12, color: "#93C5FD" }}>
+            <Spinner />
+            <div>
+              <div style={{ fontWeight: 700, color: "#E0F2FE" }}>Context pipeline</div>
+              <div style={{ fontSize: 11, color: "#64748B", marginTop: 2 }}>{contextStage.label}</div>
+            </div>
+            <span style={{ marginLeft: "auto", fontSize: 10, color: "#475569", textTransform: "uppercase", letterSpacing: 0.6 }}>{contextStage.step}</span>
+          </div>
+        )}
 
         {/* ── PHASE: INPUT ── */}
         {phase === "input" && (

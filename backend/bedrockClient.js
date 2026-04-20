@@ -236,6 +236,24 @@ export function extractHttpGatewayAssistantText(parsed, depth = 0) {
   if (typeof parsed === "string") return parsed;
   if (typeof parsed !== "object") return "";
 
+  if (Array.isArray(parsed)) {
+    let acc = "";
+    for (const el of parsed) {
+      const t = extractHttpGatewayAssistantText(el, depth + 1);
+      if (t) acc += t;
+    }
+    const joined = acc.trim();
+    if (joined) return joined;
+  }
+
+  // Bedrock Converse / InvokeModel stream events (Lambda proxies often forward these verbatim)
+  const cbd = parsed.contentBlockDelta;
+  if (cbd && typeof cbd === "object") {
+    const dt = cbd.delta?.text;
+    if (typeof dt === "string" && dt) return dt;
+  }
+  if (typeof parsed.delta?.text === "string" && parsed.delta.text) return parsed.delta.text;
+
   if (typeof parsed.text === "string") return parsed.text;
   if (typeof parsed.output_text === "string") return parsed.output_text;
   if (typeof parsed.completion === "string") return parsed.completion;
@@ -271,6 +289,10 @@ export function extractHttpGatewayAssistantText(parsed, depth = 0) {
     const t = textFromContentBlocks(delta);
     if (t) return t;
   }
+
+  // OpenAI-compatible streaming: choices[0].delta as string (some gateways)
+  const d0 = parsed.choices?.[0]?.delta;
+  if (d0 && typeof d0 === "object" && typeof d0.text === "string" && d0.text) return d0.text;
 
   const gemParts = parsed.candidates?.[0]?.content?.parts;
   if (Array.isArray(gemParts)) {
@@ -335,7 +357,10 @@ function extractAggregatedStreamingAssistantText(raw) {
     const piece = extractHttpGatewayAssistantText(chunk);
     const deltaStr =
       typeof chunk?.choices?.[0]?.delta?.content === "string" ? chunk.choices[0].delta.content : "";
-    const part = String(piece || deltaStr || "");
+    const bedrockDelta =
+      typeof chunk?.contentBlockDelta?.delta?.text === "string" ? chunk.contentBlockDelta.delta.text : "";
+    const plainDeltaText = typeof chunk?.delta?.text === "string" ? chunk.delta.text : "";
+    const part = String(piece || deltaStr || bedrockDelta || plainDeltaText || "");
     if (part) acc += part;
   }
   return acc.trim();

@@ -7,10 +7,12 @@ import {
   syncPublishJiraSiteFromIssue,
   savePublishDefaults,
   getLlmProviderForRequest,
+  getLlmDisabledForRequest,
   getBedrockModelTierForRequest,
 } from "./ConnectorsStatus.jsx";
 import { exportAgentOutput } from "./agentExport.js";
 import { buildShareSubjectLine } from "./shareSubject.js";
+import { buildAgentPrefaceContext } from "./agentContextPipeline.js";
 
 const MODELS = [
   { id: "claude-sonnet-4-20250514", label: "Sonnet 4.6", color: "#F59E0B" },
@@ -222,14 +224,17 @@ async function apiJson(path, body, method = "POST") {
   return data;
 }
 
-async function callLLM(systemPrompt, userMessage, maxTokens, modelId) {
+async function callLLM(systemPrompt, userMessage, maxTokens, modelId, prefaceContext = "") {
+  const pc = typeof prefaceContext === "string" ? prefaceContext.trim() : "";
   const data = await apiJson("/api/generate", {
     system: systemPrompt,
     model: modelId,
     messages: [{ role: "user", content: userMessage }],
     max_tokens: maxTokens,
     llmProvider: getLlmProviderForRequest(),
+    llmDisabled: getLlmDisabledForRequest(),
     bedrockModelTier: getBedrockModelTierForRequest(),
+    ...(pc ? { prefaceContext: pc } : {}),
   });
   const payload = data.data ?? data;
   const blocks = payload?.content;
@@ -522,6 +527,7 @@ export default function JiraAgent() {
   const [attachStatus, setAttachStatus] = useState("");
 
   const [history, setHistory] = useState(() => loadHistory());
+  const [contextStage, setContextStage] = useState(null);
   const [showHistory, setShowHistory] = useState(false);
   /** History entry id used to persist linked JIRAs after create (set on generate or load). */
   const historyAnchorRef = useRef(null);
@@ -616,6 +622,22 @@ export default function JiraAgent() {
       .filter((f) => f.includeInPrompt && f.extractedText?.trim())
       .forEach((f) => parts.push(`--- Uploaded file: ${f.name} ---\n${f.extractedText}`));
     return parts.join("\n\n");
+  };
+
+  const loadPreface = async (querySlice) => {
+    const histLines = history.slice(0, 4).map(
+      (h) => `JIRA: ${h.featureName || h.projectKey || "session"} — ${(h.requirement || "").slice(0, 140)}`
+    );
+    try {
+      return await buildAgentPrefaceContext({
+        apiBase: API_BASE,
+        query: querySlice,
+        historyLines: histLines,
+        onStep: (s) => setContextStage(s),
+      });
+    } finally {
+      setContextStage(null);
+    }
   };
 
   const handleContextFilesChange = async (e) => {
@@ -750,7 +772,8 @@ export default function JiraAgent() {
     setStatusMsg("Analyzing input and drafting objective…");
     try {
       const ctx = truncateForLLM(buildContext(), MAX_CLARIFY_CHARS);
-      const raw = await callLLM(CLARIFY_SYSTEM, ctx, 1400, model.id);
+      const pf = await loadPreface(ctx.slice(0, 3000));
+      const raw = await callLLM(CLARIFY_SYSTEM, ctx, 1400, model.id, pf);
       let parsed = null;
       try {
         parsed = repairJSON(raw);
@@ -783,7 +806,8 @@ export default function JiraAgent() {
       let userMsg = buildContext();
       if (clarifyAnswers.trim()) userMsg += `\n\nClarification answers:\n${clarifyAnswers.trim()}`;
       userMsg = truncateForLLM(userMsg, MAX_GENERATE_CHARS);
-      const md = await callLLM(JIRA_SYSTEM, userMsg, 8000, model.id);
+      const pf = await loadPreface(userMsg.slice(0, 3000));
+      const md = await callLLM(JIRA_SYSTEM, userMsg, 8000, model.id, pf);
       setResultMd(md);
       let nextSubs = [];
       if (includeSubJiras) {
@@ -792,7 +816,8 @@ export default function JiraAgent() {
           SUBTASK_SYSTEM,
           truncateForLLM(`CONTEXT:\n${buildContext()}\n\nPARENT TICKET:\n${md}`, Math.min(MAX_GENERATE_CHARS, 120_000)),
           5000,
-          model.id
+          model.id,
+          pf
         );
         try {
           const p = repairJSON(subRaw);
@@ -854,7 +879,9 @@ export default function JiraAgent() {
     setStatusMsg("Improving ticket…");
     try {
       const prompt = `CURRENT TICKET:\n${resultMd}\n\nUSER FEEDBACK:\n${feedback}`;
-      const improved = await callLLM(FEEDBACK_SYSTEM, truncateForLLM(prompt, MAX_GENERATE_CHARS), 8000, model.id);
+      const truncated = truncateForLLM(prompt, MAX_GENERATE_CHARS);
+      const pf = await loadPreface(truncated.slice(0, 3000));
+      const improved = await callLLM(FEEDBACK_SYSTEM, truncated, 8000, model.id, pf);
       setResultMd(improved);
       setFeedback("");
       setFeedbackIncorporated(true);
@@ -1323,6 +1350,31 @@ export default function JiraAgent() {
           }}
         >
           {statusMsg}
+        </div>
+      ) : null}
+
+      {contextStage ? (
+        <div
+          style={{
+            position: "sticky",
+            top: statusMsg ? 88 : 40,
+            zIndex: 49,
+            padding: "10px 24px",
+            fontSize: 12,
+            background: "#0C1A2E",
+            color: "#93C5FD",
+            borderBottom: "1px solid #1E3A5F",
+            display: "flex",
+            alignItems: "center",
+            gap: 10,
+          }}
+        >
+          <Spinner />
+          <div>
+            <div style={{ fontWeight: 700, color: "#E0F2FE" }}>Context pipeline</div>
+            <div style={{ fontSize: 11, color: "#64748B" }}>{contextStage.label}</div>
+          </div>
+          <span style={{ marginLeft: "auto", fontSize: 10, color: "#475569", textTransform: "uppercase", letterSpacing: 0.6 }}>{contextStage.step}</span>
         </div>
       ) : null}
 

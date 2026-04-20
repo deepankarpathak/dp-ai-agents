@@ -19,8 +19,13 @@ const PUBLISH_DEFAULTS_EMPTY = {
   jiraWriteSite: "auto",
   /** openai | foundry — which backend Share & Score uses for Get score */
   scoreProvider: "openai",
-  /** aws | foundry — which LLM backend PRD / UAT / BRD / JIRA agents use (default AWS Bedrock). */
-  llmProvider: "aws",
+  /**
+   * auto | aws | foundry | off — routing for agent generation calls.
+   * auto = Bedrock primary, Foundry fallback.
+   */
+  llmProvider: "auto",
+  /** Allow disabling individual providers even when mode is auto. */
+  llmDisabled: { aws: false, foundry: false },
   /** sonnet | opus | haiku — Bedrock model family when LLM provider is AWS (maps to inference profile IDs on the server). */
   bedrockModelTier: "sonnet",
 };
@@ -61,7 +66,20 @@ export function syncPublishJiraSiteFromIssue(d) {
 /** Current LLM routing for /api/generate (browser default from Connectors). */
 export function getLlmProviderForRequest() {
   const d = loadPublishDefaults();
-  return d.llmProvider === "foundry" ? "foundry" : "aws";
+  const v = String(d.llmProvider || "auto").toLowerCase();
+  if (v === "foundry") return "foundry";
+  if (v === "aws") return "aws";
+  if (v === "off") return "off";
+  return "auto";
+}
+
+export function getLlmDisabledForRequest() {
+  const d = loadPublishDefaults();
+  const x = d?.llmDisabled;
+  return {
+    aws: Boolean(x?.aws),
+    foundry: Boolean(x?.foundry),
+  };
 }
 
 /** Bedrock model tier for /api/generate when LLM provider is AWS. */
@@ -370,11 +388,32 @@ export default function ConnectorsStatus() {
             </div>
 
             <div style={{ marginBottom: 16, padding: 14, background: "#1e293b", borderRadius: 12, border: "1px solid #334155" }}>
-              <div style={{ fontSize: 12, fontWeight: 700, color: "#e2e8f0", marginBottom: 8 }}>LLM provider (all agents)</div>
+              <div style={{ fontSize: 12, fontWeight: 700, color: "#e2e8f0", marginBottom: 8 }}>LLM routing (all agents)</div>
               <p style={{ fontSize: 11, color: "#64748b", margin: "0 0 10px", lineHeight: 1.5 }}>
-                Choose whether PRD, UAT, BRD, and JIRA agents call <strong style={{ color: "#93c5fd" }}>AWS Bedrock</strong> or your <strong style={{ color: "#93c5fd" }}>Foundry</strong> gateway. Saved in this browser.
+                Auto routes to <strong style={{ color: "#93c5fd" }}>AWS Bedrock</strong> first, then falls back to <strong style={{ color: "#93c5fd" }}>Foundry</strong> if Bedrock fails. You can also force a single provider or disable all LLM calls. Saved in this browser.
               </p>
               <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const next = { ...loadPublishDefaults(), llmProvider: "auto" };
+                    savePublishDefaults(next);
+                    setPublishDefaults(next);
+                  }}
+                  style={{
+                    padding: "8px 14px",
+                    borderRadius: 8,
+                    border: (String(publishDefaults.llmProvider || "auto") === "auto" ? "#f59e0b" : "#334155") + " 1px solid",
+                    background: String(publishDefaults.llmProvider || "auto") === "auto" ? "#f59e0b22" : "#0f172a",
+                    color: String(publishDefaults.llmProvider || "auto") === "auto" ? "#fbbf24" : "#94a3b8",
+                    fontSize: 12,
+                    fontWeight: 600,
+                    cursor: "pointer",
+                    fontFamily: "inherit",
+                  }}
+                >
+                  Auto (Bedrock → Foundry)
+                </button>
                 <button
                   type="button"
                   onClick={() => {
@@ -385,16 +424,16 @@ export default function ConnectorsStatus() {
                   style={{
                     padding: "8px 14px",
                     borderRadius: 8,
-                    border: (publishDefaults.llmProvider !== "foundry" ? "#f59e0b" : "#334155") + " 1px solid",
-                    background: publishDefaults.llmProvider !== "foundry" ? "#f59e0b22" : "#0f172a",
-                    color: publishDefaults.llmProvider !== "foundry" ? "#fbbf24" : "#94a3b8",
+                    border: String(publishDefaults.llmProvider || "auto") === "aws" ? "#38bdf8 1px solid" : "#334155 1px solid",
+                    background: String(publishDefaults.llmProvider || "auto") === "aws" ? "#38bdf822" : "#0f172a",
+                    color: String(publishDefaults.llmProvider || "auto") === "aws" ? "#7dd3fc" : "#94a3b8",
                     fontSize: 12,
                     fontWeight: 600,
                     cursor: "pointer",
                     fontFamily: "inherit",
                   }}
                 >
-                  AWS Bedrock
+                  Bedrock only
                 </button>
                 <button
                   type="button"
@@ -406,22 +445,69 @@ export default function ConnectorsStatus() {
                   style={{
                     padding: "8px 14px",
                     borderRadius: 8,
-                    border: publishDefaults.llmProvider === "foundry" ? "#38bdf8 1px solid" : "#334155 1px solid",
-                    background: publishDefaults.llmProvider === "foundry" ? "#38bdf822" : "#0f172a",
-                    color: publishDefaults.llmProvider === "foundry" ? "#7dd3fc" : "#94a3b8",
+                    border: String(publishDefaults.llmProvider || "auto") === "foundry" ? "#38bdf8 1px solid" : "#334155 1px solid",
+                    background: String(publishDefaults.llmProvider || "auto") === "foundry" ? "#38bdf822" : "#0f172a",
+                    color: String(publishDefaults.llmProvider || "auto") === "foundry" ? "#7dd3fc" : "#94a3b8",
                     fontSize: 12,
                     fontWeight: 600,
                     cursor: "pointer",
                     fontFamily: "inherit",
                   }}
                 >
-                  Foundry
+                  Foundry only
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const next = { ...loadPublishDefaults(), llmProvider: "off" };
+                    savePublishDefaults(next);
+                    setPublishDefaults(next);
+                  }}
+                  style={{
+                    padding: "8px 14px",
+                    borderRadius: 8,
+                    border: String(publishDefaults.llmProvider || "auto") === "off" ? "#f87171 1px solid" : "#334155 1px solid",
+                    background: String(publishDefaults.llmProvider || "auto") === "off" ? "#f8717122" : "#0f172a",
+                    color: String(publishDefaults.llmProvider || "auto") === "off" ? "#fecaca" : "#94a3b8",
+                    fontSize: 12,
+                    fontWeight: 600,
+                    cursor: "pointer",
+                    fontFamily: "inherit",
+                  }}
+                >
+                  LLM off
                 </button>
                 <span style={{ fontSize: 10, color: "#64748b", flex: "1 1 200px" }}>
                   Bedrock: {status.llmBedrockConfigured ? <span style={{ color: "#22c55e" }}>env OK</span> : <span style={{ color: "#f87171" }}>not linked</span>}
                   {" · "}
                   Foundry: {status.llmFoundryConfigured ? <span style={{ color: "#22c55e" }}>env OK</span> : <span style={{ color: "#f87171" }}>not linked</span>}
                 </span>
+              </div>
+              <div style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+                <label style={{ display: "inline-flex", gap: 8, alignItems: "center", fontSize: 11, color: "#94a3b8" }}>
+                  <input
+                    type="checkbox"
+                    checked={!!publishDefaults.llmDisabled?.aws}
+                    onChange={(e) => {
+                      const next = { ...loadPublishDefaults(), llmDisabled: { ...(loadPublishDefaults().llmDisabled || {}), aws: e.target.checked } };
+                      savePublishDefaults(next);
+                      setPublishDefaults(next);
+                    }}
+                  />
+                  Disable Bedrock
+                </label>
+                <label style={{ display: "inline-flex", gap: 8, alignItems: "center", fontSize: 11, color: "#94a3b8" }}>
+                  <input
+                    type="checkbox"
+                    checked={!!publishDefaults.llmDisabled?.foundry}
+                    onChange={(e) => {
+                      const next = { ...loadPublishDefaults(), llmDisabled: { ...(loadPublishDefaults().llmDisabled || {}), foundry: e.target.checked } };
+                      savePublishDefaults(next);
+                      setPublishDefaults(next);
+                    }}
+                  />
+                  Disable Foundry
+                </label>
               </div>
               <div style={{ marginTop: 14, paddingTop: 12, borderTop: "1px solid #334155" }}>
                 <div style={{ fontSize: 11, fontWeight: 600, color: "#e2e8f0", marginBottom: 6 }}>Bedrock model (when AWS is selected)</div>

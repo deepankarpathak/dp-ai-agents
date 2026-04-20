@@ -1,4 +1,7 @@
 import { useState, useRef, useCallback } from "react";
+import { API_BASE } from "./config.js";
+import { getLlmProviderForRequest, getLlmDisabledForRequest, getBedrockModelTierForRequest } from "./ConnectorsStatus.jsx";
+import { buildAgentPrefaceContext } from "./agentContextPipeline.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const MODELS = [
@@ -296,6 +299,7 @@ export default function UATAgent() {
   const [webSearch, setWebSearch] = useState(false);
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState("");
+  const [contextStage, setContextStage] = useState(null);
   const [result, setResult] = useState(null);
   const [clarifyQs, setClarifyQs] = useState(null);
   const [clarifyAnswers, setClarifyAnswers] = useState("");
@@ -367,22 +371,69 @@ export default function UATAgent() {
     return false;
   };
 
-  const callClaude = async (systemPrompt, userMessage) => {
-    const tools = webSearch ? [{ type: "web_search_20250305", name: "web_search" }] : undefined;
-    const res = await fetch("https://api.anthropic.com/v1/messages", {
+  const loadPreface = async (queryText) => {
+    const histLines = _history.slice(0, 4).map((e) => `UAT: ${e.jira || "session"} — ${(e.domains || []).join(", ")}`);
+    try {
+      return await buildAgentPrefaceContext({
+        apiBase: API_BASE,
+        query: queryText,
+        historyLines: histLines,
+        onStep: (s) => setContextStage(s),
+      });
+    } finally {
+      setContextStage(null);
+    }
+  };
+
+  const callLlmWithContext = async (systemPrompt, userMessage, maxTokens = 4000) => {
+    const pf = await loadPreface((userMessage || "").slice(0, 3000));
+    if (webSearch) {
+      const systemAug = pf
+        ? `${systemPrompt}\n\n[Context from prior sessions and /docs — use only when relevant]\n${pf}`
+        : systemPrompt;
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-20250514",
+          max_tokens: maxTokens,
+          system: systemAug,
+          messages: [{ role: "user", content: userMessage }],
+          tools: [{ type: "web_search_20250305", name: "web_search" }],
+        }),
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error.message);
+      return data.content.map((b) => (b.type === "text" ? b.text : "")).filter(Boolean).join("\n");
+    }
+    const res = await fetch(`${API_BASE}/api/generate`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        model: "claude-sonnet-4-20250514",
-        max_tokens: 4000,
         system: systemPrompt,
+        model,
         messages: [{ role: "user", content: userMessage }],
-        ...(tools ? { tools } : {})
-      })
+        max_tokens: maxTokens,
+        ...(pf ? { prefaceContext: pf } : {}),
+        llmProvider: getLlmProviderForRequest(),
+        llmDisabled: getLlmDisabledForRequest(),
+        bedrockModelTier: getBedrockModelTierForRequest(),
+      }),
     });
-    const data = await res.json();
-    if (data.error) throw new Error(data.error.message);
-    return data.content.map(b => b.type === "text" ? b.text : "").filter(Boolean).join("\n");
+    const text = await res.text();
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = {};
+    }
+    if (!res.ok) {
+      throw new Error(data.message || data.error?.message || data.error || `Request failed: ${res.status}`);
+    }
+    const payload = data.content ? data : data.data || data;
+    const blocks = payload?.content;
+    if (!Array.isArray(blocks)) throw new Error("Unexpected LLM response shape");
+    return blocks.filter((b) => b.type === "text").map((b) => b.text || "").join("\n");
   };
 
   const runGenerate = async (withClarifications = false) => {
@@ -394,12 +445,12 @@ export default function UATAgent() {
       let userMsg = withClarifications && clarifyAnswers.trim() ? ctx + `\n## Clarification Answers\n${clarifyAnswers}\n` : ctx;
       if (askQuestions && !withClarifications) {
         setStatus("Generating clarifying questions...");
-        const qs = await callClaude(CLARIFY_SYSTEM, ctx);
+        const qs = await callLlmWithContext(CLARIFY_SYSTEM, ctx);
         setClarifyQs(qs); setLoading(false); setStatus(""); return;
       }
       setStatus("Generating UAT Signoff document...");
       const domains = DOMAINS.filter(d => selectedDomains.includes(d.id));
-      const signoff = await callClaude(buildSystemPrompt(domains), userMsg);
+      const signoff = await callLlmWithContext(buildSystemPrompt(domains), userMsg, 8000);
       const entry = saveHistory({
         jira: jiraSubject || jiraFiles[0]?.name || "Unnamed Session",
         model: MODELS.find(m => m.id === model)?.label || model,
@@ -649,6 +700,16 @@ export default function UATAgent() {
         </div>
       )}
 
+      {contextStage && (
+        <div style={{ background: "#0c1a2e", border: "1px solid #1e3a5f", borderRadius: 8, padding: "11px 16px", marginBottom: 10, fontSize: 12, color: "#93c5fd", display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{ width: 14, height: 14, border: "2px solid #1e293b", borderTop: "2px solid #38bdf8", borderRadius: "50%", animation: "spin .7s linear infinite", flexShrink: 0 }} />
+          <div>
+            <div style={{ fontWeight: 700, color: "#e0f2fe" }}>Context pipeline</div>
+            <div style={{ fontSize: 11, color: "#64748b" }}>{contextStage.label}</div>
+          </div>
+          <span style={{ marginLeft: "auto", fontSize: 10, color: "#475569", textTransform: "uppercase" }}>{contextStage.step}</span>
+        </div>
+      )}
       {status && (
         <div style={{ background: "#1a1a2e", border: "1px solid #f59e0b", borderRadius: 8, padding: "11px 16px", marginBottom: 14, fontSize: 13, color: "#fbbf24" }}>
           {status}
@@ -732,6 +793,7 @@ export default function UATAgent() {
 
   return (
     <div style={S.root}>
+      <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
       <nav style={S.nav}>
         <div style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }} onClick={() => setView("home")}>
           <div style={{ width: 32, height: 32, background: "linear-gradient(135deg, #d97706, #f59e0b)", borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, flexShrink: 0 }}>🤖</div>

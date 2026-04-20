@@ -12,6 +12,7 @@ import { Document, Packer, Paragraph, HeadingLevel } from "docx";
 import { extractTextFromPDF, extractTextFromPDFBuffer } from "./pdfParser.js";
 import FormData from "form-data";
 import { retrieve as ragRetrieve } from "./rag/retrieve.js";
+import { buildDocsKnowledgeContext } from "./docsKnowledge.js";
 import {
   converseBedrock,
   isBedrockConfigured,
@@ -88,6 +89,59 @@ const llmProviderHealth = {
   openai: { configured: false, ok: null, error: null, at: null },
   gemini: { configured: false, ok: null, error: null, at: null },
 };
+
+/**
+ * Lightweight in-memory usage stats (last 24h) for UI.
+ * Note: resets on server restart; intended for local/dev observability.
+ */
+const LLM_USAGE_WINDOW_MS = 24 * 60 * 60 * 1000;
+const llmUsageEvents = [];
+function recordLlmUsageEvent(evt) {
+  const now = Date.now();
+  llmUsageEvents.push({ ...evt, at: now });
+  // prune
+  const cutoff = now - LLM_USAGE_WINDOW_MS;
+  while (llmUsageEvents.length && llmUsageEvents[0].at < cutoff) {
+    llmUsageEvents.shift();
+  }
+}
+function buildLlmUsageSummary() {
+  const cutoff = Date.now() - LLM_USAGE_WINDOW_MS;
+  const recent = llmUsageEvents.filter((e) => e.at >= cutoff);
+  const by = {};
+  for (const e of recent) {
+    const k = e.provider || "unknown";
+    const cur = by[k] || {
+      calls24h: 0,
+      ok24h: 0,
+      err24h: 0,
+      lastOkAt: null,
+      lastErrAt: null,
+      lastErr: null,
+      p50ms: null,
+      p95ms: null,
+    };
+    cur.calls24h += 1;
+    if (e.ok) {
+      cur.ok24h += 1;
+      cur.lastOkAt = e.at;
+    } else {
+      cur.err24h += 1;
+      cur.lastErrAt = e.at;
+      cur.lastErr = e.error || cur.lastErr;
+    }
+    by[k] = cur;
+  }
+  // percentiles
+  for (const [k, cur] of Object.entries(by)) {
+    const ms = recent.filter((e) => e.provider === k && typeof e.ms === "number").map((e) => e.ms).sort((a, b) => a - b);
+    if (!ms.length) continue;
+    const p = (q) => ms[Math.min(ms.length - 1, Math.floor(q * (ms.length - 1)))];
+    cur.p50ms = p(0.5);
+    cur.p95ms = p(0.95);
+  }
+  return by;
+}
 
 const PROBE_TIMEOUT_MS = 20000;
 
@@ -224,6 +278,7 @@ async function probeGeminiLlm() {
 }
 
 function buildLlmProvidersPayload() {
+  const usage = buildLlmUsageSummary();
   const bedrock = {
     id: "bedrock",
     label: "AWS Bedrock",
@@ -231,6 +286,7 @@ function buildLlmProvidersPayload() {
     ok: bedrockHealth.ok,
     error: bedrockHealth.error,
     at: bedrockHealth.at,
+    usage24h: usage.bedrock || usage.aws || null,
   };
   const foundry = {
     id: "foundry",
@@ -239,6 +295,7 @@ function buildLlmProvidersPayload() {
     ok: llmProviderHealth.foundry.ok,
     error: llmProviderHealth.foundry.error,
     at: llmProviderHealth.foundry.at,
+    usage24h: usage.foundry || null,
   };
   const openai = {
     id: "openai",
@@ -247,6 +304,7 @@ function buildLlmProvidersPayload() {
     ok: llmProviderHealth.openai.ok,
     error: llmProviderHealth.openai.error,
     at: llmProviderHealth.openai.at,
+    usage24h: usage.openai || null,
   };
   const gemini = {
     id: "gemini",
@@ -255,6 +313,7 @@ function buildLlmProvidersPayload() {
     ok: llmProviderHealth.gemini.ok,
     error: llmProviderHealth.gemini.error,
     at: llmProviderHealth.gemini.at,
+    usage24h: usage.gemini || null,
   };
   return [bedrock, foundry, openai, gemini];
 }
@@ -506,6 +565,19 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: "10mb" }));
 
+app.post("/api/context/knowledge", async (req, res) => {
+  try {
+    const q = String(req.body?.q || req.body?.query || "").trim();
+    if (!q) {
+      return res.status(400).json({ success: false, error: "Missing q" });
+    }
+    const { text, filesUsed, error } = await buildDocsKnowledgeContext(q);
+    res.json({ success: true, text: text || "", filesUsed: filesUsed || [], error: error || null });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err?.message || String(err) });
+  }
+});
+
 app.post("/api/generate", async (req, res) => {
   try {
     const incomingMessages = Array.isArray(req.body?.messages) ? req.body.messages : null;
@@ -520,27 +592,46 @@ app.post("/api/generate", async (req, res) => {
           ? JSON.stringify(rawUserContent)
           : req.body?.prompt || ""
     ).slice(0, 4000);
+    const prefaceRaw =
+      typeof req.body?.prefaceContext === "string" ? req.body.prefaceContext.trim() : "";
+    if (prefaceRaw) {
+      incomingSystem =
+        (incomingSystem || "") +
+        "\n\n[Context from prior sessions and /docs — use only when relevant]\n" +
+        prefaceRaw.slice(0, 12000);
+    }
     const ragChunks = await ragRetrieve(userText, 5);
     if (ragChunks.length > 0) {
       const ragContext = "\n\n[Reference context from NPCI/UPI/PRD docs – use where relevant]\n" + ragChunks.join("\n\n");
       incomingSystem = (incomingSystem || "") + ragContext;
     }
 
-    const llmProvider = String(req.body?.llmProvider || process.env.LLM_PROVIDER_DEFAULT || "aws").toLowerCase() === "foundry" ? "foundry" : "aws";
+    const requested = String(req.body?.llmProvider || process.env.LLM_PROVIDER_DEFAULT || "aws").toLowerCase();
+    if (requested === "off") {
+      return res.status(423).json({
+        success: false,
+        error: "LLM_DISABLED",
+        message: "LLM is turned off in Connector Settings.",
+      });
+    }
+    const llmDisabled = req.body?.llmDisabled && typeof req.body.llmDisabled === "object" ? req.body.llmDisabled : {};
+    const disableAws = String(llmDisabled.aws || "").toLowerCase() === "true";
+    const disableFoundry = String(llmDisabled.foundry || "").toLowerCase() === "true";
+    const llmMode =
+      requested === "auto" || requested === "fallback" ? "auto" : requested === "foundry" ? "foundry" : "aws";
     const modelFromBody = typeof req.body?.model === "string" && req.body.model.trim() ? req.body.model.trim() : null;
     const bedrockModelTier =
       typeof req.body?.bedrockModelTier === "string" && req.body.bedrockModelTier.trim()
         ? req.body.bedrockModelTier.trim()
         : null;
 
-    if (llmProvider === "aws") {
+    const tryAws = async () => {
       if (!isBedrockConfigured()) {
-        return res.status(503).json({
-          success: false,
-          error: "BEDROCK_NOT_CONFIGURED",
-          message:
-            "AWS Bedrock is not configured. Set BEDROCK_INVOKE_URL + BEDROCK_API_KEY (or BED_LLM_KEY), or native Bedrock: BEDROCK_MODEL_ID, AWS_REGION, credentials / BEDROCK_USE_DEFAULT_CREDENTIALS. See .env.example.",
-        });
+        const err = new Error(
+          "AWS Bedrock is not configured. Set BEDROCK_INVOKE_URL + BEDROCK_API_KEY (or BED_LLM_KEY), or native Bedrock: BEDROCK_MODEL_ID, AWS_REGION, credentials / BEDROCK_USE_DEFAULT_CREDENTIALS. See .env.example."
+        );
+        err.code = "BEDROCK_NOT_CONFIGURED";
+        throw err;
       }
       console.log(
         "[api/generate] provider=aws",
@@ -548,6 +639,7 @@ app.post("/api/generate", async (req, res) => {
         modelFromBody ? `model(body)=${modelFromBody}` : ""
       );
       try {
+        const started = Date.now();
         const data = await converseBedrock({
           messages,
           system: incomingSystem || undefined,
@@ -555,62 +647,88 @@ app.post("/api/generate", async (req, res) => {
           modelId: modelFromBody || undefined,
           bedrockModelTier,
         });
-        return res.json({ success: true, data, llmProvider: "aws" });
+        recordLlmUsageEvent({ provider: "bedrock", ok: true, ms: Date.now() - started });
+        return { provider: "aws", data };
       } catch (err) {
+        recordLlmUsageEvent({ provider: "bedrock", ok: false, error: err.message || String(err) });
         console.error("[api/generate] bedrock error:", err.message || err);
-        return res.status(500).json({
-          success: false,
-          error: "BEDROCK_ERROR",
-          message: err.message || String(err),
+        const e = new Error(err.message || String(err));
+        e.code = "BEDROCK_ERROR";
+        throw e;
+      }
+    };
+
+    const tryFoundry = async () => {
+      if (!LLM_API_KEY) {
+        const err = new Error("Set LLM_KEY_API (preferred) or LLM_API_KEY in .env for Foundry.");
+        err.code = "MISSING_API_KEY";
+        throw err;
+      }
+      const requestBody = {
+        model: modelFromBody || LLM_MODEL,
+        max_tokens: incomingMaxTokens,
+        ...(incomingSystem ? { system: incomingSystem } : {}),
+        messages,
+      };
+      const doCall = (authMode) =>
+        fetch(LLM_URL, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...(authMode === "x-api-key" ? { "x-api-key": LLM_API_KEY } : { Authorization: `Bearer ${LLM_API_KEY}` }),
+          },
+          body: JSON.stringify(requestBody),
         });
+      const started = Date.now();
+      let authMode = "x-api-key";
+      let response = await doCall(authMode);
+      if (response.status === 401) {
+        authMode = "bearer";
+        response = await doCall(authMode);
+      }
+      const responseText = await response.text();
+      if (!response.ok) {
+        recordLlmUsageEvent({ provider: "foundry", ok: false, ms: Date.now() - started, error: `HTTP ${response.status}: ${responseText.slice(0, 300)}` });
+        const err = new Error(responseText);
+        err.code = "LLM_GATEWAY_ERROR";
+        err.httpStatus = response.status;
+        throw err;
+      }
+      let parsed;
+      try {
+        parsed = JSON.parse(responseText);
+      } catch (err) {
+        recordLlmUsageEvent({ provider: "foundry", ok: false, ms: Date.now() - started, error: "INVALID_JSON_FROM_LLM" });
+        const e = new Error("Invalid JSON from LLM gateway.");
+        e.code = "INVALID_JSON_FROM_LLM";
+        throw e;
+      }
+      recordLlmUsageEvent({ provider: "foundry", ok: true, ms: Date.now() - started });
+      console.log("[api/generate] provider=foundry");
+      return { provider: "foundry", data: parsed };
+    };
+
+    const order =
+      llmMode === "auto" ? ["aws", "foundry"] : llmMode === "foundry" ? ["foundry"] : ["aws"];
+    const tried = [];
+    let lastErr = null;
+    for (const p of order) {
+      if (p === "aws" && disableAws) { tried.push("aws(disabled)"); continue; }
+      if (p === "foundry" && disableFoundry) { tried.push("foundry(disabled)"); continue; }
+      try {
+        const result = p === "aws" ? await tryAws() : await tryFoundry();
+        return res.json({ success: true, data: result.data, llmProvider: result.provider, llmTried: tried });
+      } catch (e) {
+        tried.push(p);
+        lastErr = e;
       }
     }
-
-    if (!LLM_API_KEY) {
-      return res.status(500).json({
-        success: false,
-        error: "MISSING_API_KEY",
-        message: "Set LLM_KEY_API (preferred) or LLM_API_KEY in .env for Foundry, or switch LLM provider to AWS in Connectors.",
-      });
-    }
-    const requestBody = {
-      model: modelFromBody || LLM_MODEL,
-      max_tokens: incomingMaxTokens,
-      ...(incomingSystem ? { system: incomingSystem } : {}),
-      messages,
-    };
-    const doCall = (authMode) =>
-      fetch(LLM_URL, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(authMode === "x-api-key" ? { "x-api-key": LLM_API_KEY } : { Authorization: `Bearer ${LLM_API_KEY}` }),
-        },
-        body: JSON.stringify(requestBody),
-      });
-    let authMode = "x-api-key";
-    let response = await doCall(authMode);
-    if (response.status === 401) {
-      authMode = "bearer";
-      response = await doCall(authMode);
-    }
-    const responseText = await response.text();
-    if (!response.ok) {
-      return res.status(response.status).json({
-        success: false,
-        error: "LLM_GATEWAY_ERROR",
-        status: response.status,
-        message: responseText,
-      });
-    }
-    let parsed;
-    try {
-      parsed = JSON.parse(responseText);
-    } catch (err) {
-      return res.status(500).json({ success: false, error: "INVALID_JSON_FROM_LLM", message: responseText });
-    }
-    console.log("[api/generate] provider=foundry");
-    res.json({ success: true, data: parsed, llmProvider: "foundry" });
+    return res.status(503).json({
+      success: false,
+      error: lastErr?.code || "LLM_UNAVAILABLE",
+      message: lastErr?.message || "No LLM backend available.",
+      tried,
+    });
   } catch (error) {
     console.error("SERVER ERROR:", error);
     res.status(500).json({ success: false, error: "SERVER_EXCEPTION", message: error.message });
