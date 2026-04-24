@@ -5,20 +5,13 @@ import { syncPublishDefaultJiraKey, loadPublishDefaults, syncPublishJiraSiteFrom
 import { exportAgentOutput } from "./agentExport.js";
 import { buildShareSubjectLine } from "./shareSubject.js";
 import { buildAgentPrefaceContext } from "./agentContextPipeline.js";
-
-// ── Domains (Feedback 2) ─────────────────────────────────────────────────────
-const DOMAINS = [
-  { id: "switch", label: "Switch", icon: "🔀", color: "#e8b84b" },
-  { id: "pms", label: "PMS", icon: "👤", color: "#60a5fa" },
-  { id: "compliance", label: "Compliance", icon: "🛡️", color: "#fbbf24" },
-  { id: "refund", label: "Refund", icon: "↩️", color: "#f87171" },
-  { id: "reconciliation", label: "Reconciliation", icon: "⚖️", color: "#a78bfa" },
-  { id: "payout", label: "Payout", icon: "💸", color: "#34d399" },
-  { id: "combination", label: "Combination", icon: "🔗", color: "#fb923c" },
-  { id: "app", label: "App", icon: "📱", color: "#38bdf8" },
-  { id: "mis", label: "MIS", icon: "📊", color: "#c084fc" },
-  { id: "all", label: "All", icon: "🌐", color: "#94a3b8" },
-];
+import AgentDomainMultiSelect from "./AgentDomainMultiSelect.jsx";
+import {
+  AGENT_DOMAIN_ENTRIES,
+  domainIdsFromLegacyDomainField,
+  domainLabelsForDisplay,
+  sanitizeDomainIds,
+} from "./agentDomainCatalog.js";
 
 const BRD_SYSTEM = `You are a senior BRD specialist for UPI/payment switch systems at a major Indian fintech. Generate a comprehensive, production-grade BRD in the following exact 24-section format. Use markdown with ## for section headers. Use markdown tables (| col | col |) for structured data. Be exhaustive — engineering teams must be able to implement from this BRD without further clarification.
 
@@ -240,7 +233,7 @@ export default function BRDAgent() {
   const [jiraId, setJiraId] = useState("");
   const [jiraData, setJiraData] = useState(null);
   const [subject, setSubject] = useState("");
-  const [domain, setDomain] = useState("switch");
+  const [selectedDomainIds, setSelectedDomainIds] = useState(["switch"]);
   const [description, setDescription] = useState("");
   const [ac, setAc] = useState("");
   const [attachments, setAttachments] = useState([]);
@@ -332,7 +325,8 @@ export default function BRDAgent() {
 
   // ── Build context ──
   const buildContext = () => {
-    let ctx = `Feature: ${subject}\nDomain: ${DOMAINS.find((d) => d.id === domain)?.label || domain}\nJIRA ID: ${jiraId || "N/A"}\n\nDescription:\n${description || "(Not provided)"}\n\nAcceptance Criteria:\n${ac || "(Not provided)"}`;
+    const domainLine = domainLabelsForDisplay(selectedDomainIds).join(", ") || "—";
+    let ctx = `Feature: ${subject}\nDomain(s): ${domainLine}\nJIRA ID: ${jiraId || "N/A"}\n\nDescription:\n${description || "(Not provided)"}\n\nAcceptance Criteria:\n${ac || "(Not provided)"}`;
     if (jiraData) ctx += `\n\nJIRA Data:\n- Status: ${jiraData.status}\n- Reporter: ${jiraData.reporter}\n- Components: ${jiraData.components}\n- Labels: ${jiraData.labels}\n- Comments: ${jiraData.comments}`;
     if (attachments.length) ctx += "\n\n" + attachments.map((a) => `--- Attachment: ${a.name} ---\n${a.content}`).join("\n");
     if (feedbackMemory.length) ctx += "\n\nPREVIOUS FEEDBACK TO REMEMBER:\n" + feedbackMemory.map((f) => `- ${f}`).join("\n");
@@ -342,6 +336,7 @@ export default function BRDAgent() {
   // ── Step 1 → Clarify or Generate ──
   const handleProceed = async () => {
     if (!subject.trim() && !description.trim()) { setError("Enter a Feature Name or Description."); return; }
+    if (!selectedDomainIds.length) { setError("Select at least one domain."); return; }
     setError(""); setLoading(true);
     if (askQ) {
       setStatusMsg("Analyzing inputs & generating questions…");
@@ -373,7 +368,15 @@ export default function BRDAgent() {
       const pf = await loadPreface(ctx.slice(0, 3000));
       const raw = await callLLM(BRD_SYSTEM, ctx, 8000, pf);
       setBrdRaw(raw);
-      const entry = { subject: subject || "Untitled", domain: DOMAINS.find((d) => d.id === domain)?.label || domain, jiraId, date: new Date().toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" }), brd: raw };
+      const domainSummary = domainLabelsForDisplay(selectedDomainIds).join(", ");
+      const entry = {
+        subject: subject || "Untitled",
+        domain: domainSummary,
+        selectedDomainIds: [...selectedDomainIds],
+        jiraId,
+        date: new Date().toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" }),
+        brd: raw,
+      };
       setHistory((prev) => [entry, ...prev].slice(0, 50));
       setPhase("output");
       setStatusMsg("");
@@ -382,6 +385,12 @@ export default function BRDAgent() {
         jiraId: parseJiraIssueKey(jiraId) || jiraId || "NOJIRA",
         subject: subject || "BRD",
         content: raw,
+        steps: [
+          "Build BRD context (inputs + clarification Q&A)",
+          "LLM: full BRD document",
+          "Save to BRD history",
+        ],
+        input: ctx,
       });
       setAllowAutoPublish(true);
       if (!hasSentNotifyRef.current) {
@@ -458,7 +467,7 @@ export default function BRDAgent() {
 
   // ── Reset ──
   const reset = () => {
-    setPhase("input"); setJiraId(""); setJiraData(null); setSubject(""); setDomain("switch"); setDescription(""); setAc(""); setAttachments([]); setQuestions([]); setAnswers({}); setBrdRaw(""); setError(""); setFeedbackText(""); setAutoPublishChannels({ jira: false, telegram: false, email: false, slack: false });
+    setPhase("input"); setJiraId(""); setJiraData(null); setSubject(""); setSelectedDomainIds(["switch"]); setDescription(""); setAc(""); setAttachments([]); setQuestions([]); setAnswers({}); setBrdRaw(""); setError(""); setFeedbackText(""); setAutoPublishChannels({ jira: false, telegram: false, email: false, slack: false });
     setAllowAutoPublish(false);
   };
 
@@ -467,6 +476,13 @@ export default function BRDAgent() {
     setBrdRaw(item.brd);
     setSubject(item.subject || "");
     setJiraId(item.jiraId || "");
+    if (Array.isArray(item.selectedDomainIds) && item.selectedDomainIds.length) {
+      setSelectedDomainIds(sanitizeDomainIds(item.selectedDomainIds));
+    } else if (item.domain) {
+      setSelectedDomainIds(domainIdsFromLegacyDomainField(item.domain));
+    } else {
+      setSelectedDomainIds(["switch"]);
+    }
     setPhase("output");
     setShowHistory(false);
   };
@@ -541,14 +557,13 @@ export default function BRDAgent() {
               </div>
 
               <div style={{ marginBottom: 14 }}>
-                <label style={{ fontSize: 11, fontWeight: 600, color: C.text3, textTransform: "uppercase", letterSpacing: "0.05em" }}>Domain</label>
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 6 }}>
-                  {DOMAINS.map((d) => (
-                    <button key={d.id} onClick={() => setDomain(d.id)} style={{ padding: "5px 12px", borderRadius: 20, fontSize: 12, cursor: "pointer", border: `1px solid ${domain === d.id ? d.color : C.border2}`, background: domain === d.id ? `${d.color}22` : "transparent", color: domain === d.id ? d.color : C.text2, fontFamily: "inherit", fontWeight: domain === d.id ? 600 : 400 }}>
-                      {d.icon} {d.label}
-                    </button>
-                  ))}
-                </div>
+                <AgentDomainMultiSelect
+                  label="Domains"
+                  value={selectedDomainIds}
+                  onChange={setSelectedDomainIds}
+                  domains={AGENT_DOMAIN_ENTRIES}
+                  colors={{ surface: C.bg3, elevated: C.bg2, border: C.border2, text: C.text, muted: C.text3, accent: C.purpleLight }}
+                />
               </div>
 
               <div style={{ marginBottom: 14 }}>

@@ -1156,6 +1156,101 @@ function normalizeJiraLabelStringsFromRequest(raw) {
   return out.slice(0, 25);
 }
 
+/**
+ * UI / API domain id → JIRA component name (shared catalog with frontend `agentDomainCatalog.js`).
+ * Aliases: refund → Refunds (legacy id). Empty string = no component (e.g. HSS).
+ */
+function jiraComponentNamesFromDomainIds(domainIds) {
+  const ids = (Array.isArray(domainIds) ? domainIds : []).map((s) => String(s || "").trim().toLowerCase()).filter(Boolean);
+  if (!ids.length) return [];
+  const idToComponent = {
+    pms: "PMS",
+    payout: "Payout",
+    refunds: "Refunds",
+    refund: "Refunds",
+    mandates: "UPI_2.0_Man",
+    switch: "Switch",
+    compliance: "Compliance",
+    reconciliation: "Recon",
+    hms: "HMS",
+    passbook: "Passbook",
+    gateway: "Switch-GW",
+    pps: "TPAP-Post-Payment",
+    tpap_switch: "Switch",
+    tpap_pms: "PMS",
+    tpap_mandates: "UPI_2.0_Man",
+    config_updates: "UPI",
+    app_common: "UPI-H5",
+    ios_app: "UPI",
+    android_app: "UPI",
+    h5_changes: "TPAP-H5",
+    combination: "Combination",
+    hss: "",
+  };
+  if (ids.includes("all")) {
+    const names = new Set();
+    Object.values(idToComponent).forEach((c) => {
+      if (c) names.add(c);
+    });
+    return [...names];
+  }
+  const names = new Set();
+  for (const id of ids) {
+    const c = idToComponent[id];
+    if (c) names.add(c);
+  }
+  return [...names];
+}
+
+function normalizeJiraComponentsInput(raw) {
+  if (raw == null) return [];
+  const arr = Array.isArray(raw) ? raw : [];
+  const names = [];
+  for (const item of arr) {
+    if (typeof item === "string" && item.trim()) names.push(item.trim());
+    else if (item && typeof item === "object" && item.name) names.push(String(item.name).trim());
+  }
+  return [...new Set(names)].filter(Boolean).slice(0, 20);
+}
+
+/**
+ * Build Jira `fields.timetracking` from create body.
+ * Accepts REST-style `timetracking: { originalEstimate, remainingEstimate }`, a string shorthand,
+ * or legacy-style keys matching Jira error field ids: timetracking_originalestimate, timetracking_remainingestimate.
+ */
+function resolveTimetrackingFromBody(body, defaultEstimate = "1d") {
+  const b = body && typeof body === "object" ? body : {};
+  const def = String(defaultEstimate || "1d").trim() || "1d";
+  const top = b.timetracking;
+  if (top && typeof top === "object" && !Array.isArray(top)) {
+    const o = String(top.originalEstimate ?? top.original ?? def).trim() || def;
+    const r = String(top.remainingEstimate ?? top.remaining ?? o).trim() || o;
+    return { originalEstimate: o, remainingEstimate: r };
+  }
+  if (typeof top === "string" && top.trim()) {
+    const v = top.trim();
+    return { originalEstimate: v, remainingEstimate: v };
+  }
+  const fromOrig = b.timetracking_originalEstimate ?? b.timetracking_originalestimate;
+  const fromRem = b.timetracking_remainingEstimate ?? b.timetracking_remainingestimate;
+  const o = String(fromOrig || def).trim() || def;
+  const r = String(fromRem || o).trim() || o;
+  return { originalEstimate: o, remainingEstimate: r };
+}
+
+/** Merge timetracking + components for JIRA Agent creates (and compatible API clients). */
+function applyJiraCreateAgentFields(fields, body) {
+  const b = body && typeof body === "object" ? body : {};
+  if (b.skipTimetracking === true) return { ...fields };
+  const out = { ...fields, timetracking: resolveTimetrackingFromBody(b, "1d") };
+  const explicit = normalizeJiraComponentsInput(b.components);
+  const domainIds = Array.isArray(b.domainIds) ? b.domainIds : Array.isArray(b.selectedDomains) ? b.selectedDomains : [];
+  const fromDomain = jiraComponentNamesFromDomainIds(domainIds);
+  const compNames = explicit.length ? explicit : fromDomain;
+  if (compNames.length) out.components = compNames.map((name) => ({ name }));
+  return out;
+}
+
 function mergeLabelsIntoJiraFields(fields, labelStrings) {
   const labels = normalizeJiraLabelStringsFromRequest(labelStrings);
   if (!labels.length) return fields;
@@ -1357,7 +1452,8 @@ app.get("/api/jira/issue-types", async (req, res) => {
 app.post("/api/jira/create", async (req, res) => {
   const logP = "[api/jira/create]";
   try {
-    const { projectKey, summary, description, issueType, issueTypeId, devAssignee, labels, jiraSite, jiraBaseUrl } = req.body || {};
+    const reqBody = req.body || {};
+    const { projectKey, summary, description, issueType, issueTypeId, devAssignee, labels, jiraSite, jiraBaseUrl } = reqBody;
     let jiraBase;
     try {
       jiraBase = resolveJiraBaseForWrite(projectKey, { jiraSite, jiraBaseUrl });
@@ -1377,6 +1473,9 @@ app.post("/api/jira/create", async (req, res) => {
           devAssignee: devAssignee || null,
           labels: Array.isArray(labels) ? labels : null,
           jiraSite: jiraSite || null,
+          domainIds: Array.isArray(reqBody.domainIds) ? reqBody.domainIds : null,
+          components: Array.isArray(reqBody.components) ? reqBody.components : null,
+          timetracking: reqBody.timetracking || null,
         },
         null,
         2
@@ -1411,21 +1510,24 @@ app.post("/api/jira/create", async (req, res) => {
       console.log(`${logP} resolved Dev Assignee (${JIRA_DEV_ASSIGNEE_FIELD_ID}):`, JSON.stringify(assigneeFields, null, 2));
     }
     const md = String(description);
-    const fieldsBase = mergeLabelsIntoJiraFields(
-      {
-        project: { key: cleanProjectKey },
-        summary: cleanSummary,
-        issuetype: buildIssuetypeField({ issueTypeName: issueType, issueTypeId }),
-        ...assigneeFields,
-      },
-      labels
+    const fieldsBase = applyJiraCreateAgentFields(
+      mergeLabelsIntoJiraFields(
+        {
+          project: { key: cleanProjectKey },
+          summary: cleanSummary,
+          issuetype: buildIssuetypeField({ issueTypeName: issueType, issueTypeId }),
+          ...assigneeFields,
+        },
+        labels
+      ),
+      reqBody
     );
     const data = await jiraCreateIssueWithMarkdownDescription(fieldsBase, md, logP, jiraBase);
     const key = data.key || "";
     void sendJiraAgentCreatedEmail({
       issueKeys: key ? [key] : [],
       summary: cleanSummary,
-      domainLabels: normalizeNotifyDomainLabels(req.body),
+      domainLabels: normalizeNotifyDomainLabels(reqBody),
     });
     res.json({
       success: true,
@@ -1504,7 +1606,8 @@ app.post("/api/jira/attach", upload.array("files", 12), async (req, res) => {
 app.post("/api/jira/create-with-subtasks", async (req, res) => {
   const logP = "[api/jira/create-with-subtasks]";
   try {
-    const { projectKey, parent, subtasks, devAssignee, labels, jiraSite, jiraBaseUrl } = req.body || {};
+    const reqBody = req.body || {};
+    const { projectKey, parent, subtasks, devAssignee, labels, jiraSite, jiraBaseUrl } = reqBody;
     let jiraBase;
     try {
       jiraBase = resolveJiraBaseForWrite(projectKey, { jiraSite, jiraBaseUrl });
@@ -1523,6 +1626,9 @@ app.post("/api/jira/create-with-subtasks", async (req, res) => {
           subtaskCount: Array.isArray(subtasks) ? subtasks.length : 0,
           labels: Array.isArray(labels) ? labels : null,
           jiraSite: jiraSite || null,
+          domainIds: Array.isArray(reqBody.domainIds) ? reqBody.domainIds : null,
+          components: Array.isArray(reqBody.components) ? reqBody.components : null,
+          timetracking: reqBody.timetracking || null,
         },
         null,
         2
@@ -1545,17 +1651,20 @@ app.post("/api/jira/create-with-subtasks", async (req, res) => {
     const parentSummary = String(parent.summary).trim().slice(0, 255);
     if (!parentSummary) return res.status(400).json({ success: false, error: "Parent summary is empty" });
     const parentMd = String(parent.description);
-    let parentFieldsBase = mergeLabelsIntoJiraFields(
-      {
-        project: { key: cleanProjectKey },
-        summary: parentSummary,
-        issuetype: buildIssuetypeField({
-          issueTypeName: parent.issueType,
-          issueTypeId: parent.issueTypeId,
-        }),
-        ...assigneeFields,
-      },
-      labels
+    let parentFieldsBase = applyJiraCreateAgentFields(
+      mergeLabelsIntoJiraFields(
+        {
+          project: { key: cleanProjectKey },
+          summary: parentSummary,
+          issuetype: buildIssuetypeField({
+            issueTypeName: parent.issueType,
+            issueTypeId: parent.issueTypeId,
+          }),
+          ...assigneeFields,
+        },
+        labels
+      ),
+      reqBody
     );
     const cf10377Parent = jiraSelectOptionFromEnv(JIRA_CF_10377_DEFAULT);
     const cf10378Parent = jiraSelectOptionFromEnv(JIRA_CF_10378_DEFAULT);
@@ -1580,18 +1689,21 @@ app.post("/api/jira/create-with-subtasks", async (req, res) => {
       const sum = String(st?.summary || "").trim().slice(0, 255);
       if (!sum) continue;
       const bodyMd = String(st?.description || st?.body || "").trim() || sum;
-      let subFieldsBase = mergeLabelsIntoJiraFields(
-        {
-          project: { key: cleanProjectKey },
-          parent: { key: parentKey },
-          summary: sum,
-          issuetype: buildSubtaskIssuetypeField({
-            issueTypeId: st.issueTypeId,
-            issueTypeName: st.issueType,
-          }),
-          ...assigneeFields,
-        },
-        labels
+      let subFieldsBase = applyJiraCreateAgentFields(
+        mergeLabelsIntoJiraFields(
+          {
+            project: { key: cleanProjectKey },
+            parent: { key: parentKey },
+            summary: sum,
+            issuetype: buildSubtaskIssuetypeField({
+              issueTypeId: st.issueTypeId,
+              issueTypeName: st.issueType,
+            }),
+            ...assigneeFields,
+          },
+          labels
+        ),
+        reqBody
       );
       const cf10377Sub = jiraSelectOptionFromEnv(JIRA_CF_10377_DEFAULT);
       const cf10378Sub = jiraSelectOptionFromEnv(JIRA_CF_10378_DEFAULT);
@@ -1624,7 +1736,7 @@ app.post("/api/jira/create-with-subtasks", async (req, res) => {
     void sendJiraAgentCreatedEmail({
       issueKeys: allKeys,
       summary: parentSummary,
-      domainLabels: normalizeNotifyDomainLabels(req.body),
+      domainLabels: normalizeNotifyDomainLabels(reqBody),
     });
     res.json({
       success: true,
@@ -2025,6 +2137,134 @@ app.post("/api/notify/complete", async (req, res) => {
         } catch (e) {
           console.error("[api/notify/complete] telegram exception:", e.message || e);
           results.push("telegram:" + e.message);
+        }
+      }
+    }
+
+    res.json({ success: true, results });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ── Analyst Agent: optional Email / Slack / JIRA with full body (input + SQL + output) ──
+app.post("/api/notify/analyst", async (req, res) => {
+  try {
+    const { subject, body: bodyRaw, channels = {}, jiraIssueKey, jiraSite, jiraBaseUrl } = req.body || {};
+    const subj = String(subject || "Analyst Agent").trim().slice(0, 500);
+    const text = String(bodyRaw || "").trim();
+    if (!text) return res.status(400).json({ success: false, error: "body is required" });
+    const wantsEmail = Boolean(channels.email);
+    const wantsSlack = Boolean(channels.slack);
+    const wantsJira = Boolean(channels.jira);
+    if (!wantsEmail && !wantsSlack && !wantsJira) {
+      return res.status(400).json({ success: false, error: "Select at least one channel (email, slack, jira)" });
+    }
+    if (wantsJira) {
+      const key = String(jiraIssueKey || "").trim();
+      if (!key) return res.status(400).json({ success: false, error: "jiraIssueKey is required when JIRA is selected" });
+    }
+    const results = [];
+    const stamp = new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
+    const fullEmailBody = `${subj}\n\n${text}\n\n— ${stamp}`;
+
+    if (wantsEmail) {
+      const emailTo = process.env.NOTIFY_EMAIL || process.env.EMAIL_USER || "";
+      if (!emailTo || !(process.env.EMAIL_SMTP_HOST || process.env.EMAIL_USER)) {
+        results.push("email:skipped_not_configured");
+      } else {
+        try {
+          const nodemailer = (await import("nodemailer")).default;
+          const transportOpts = {
+            host: process.env.EMAIL_SMTP_HOST || "smtp.gmail.com",
+            port: Number(process.env.EMAIL_SMTP_PORT) || 587,
+            secure: process.env.EMAIL_SECURE === "true",
+            auth: process.env.EMAIL_USER ? { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS || process.env.EMAIL_PASSWORD } : undefined,
+          };
+          const transporter = nodemailer.createTransport(transportOpts);
+          await transporter.sendMail({
+            from: process.env.EMAIL_FROM || process.env.EMAIL_USER || "noreply@local",
+            to: emailTo,
+            subject: subj,
+            text: fullEmailBody,
+          });
+          results.push("email:ok");
+        } catch (e) {
+          console.error("[api/notify/analyst] email failed:", e.message || e);
+          results.push("email:" + (e.message || String(e)));
+        }
+      }
+    }
+
+    if (wantsSlack) {
+      const slackUrl = process.env.SLACK_WEBHOOK_URL || "";
+      if (!slackUrl) {
+        results.push("slack:skipped_not_configured");
+      } else {
+        try {
+          const slackBody = `*${subj.replace(/\*/g, "")}*\n\n${text}`;
+          const chunkSize = 3500;
+          let slackOk = true;
+          for (let i = 0; i < slackBody.length; i += chunkSize) {
+            const chunk = slackBody.slice(i, i + chunkSize);
+            const r = await fetch(slackUrl, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ text: chunk }),
+            });
+            if (!r.ok) {
+              const txt = await r.text().catch(() => "");
+              console.error("[api/notify/analyst] slack failed:", r.status, String(txt).slice(0, 300));
+              slackOk = false;
+              results.push("slack:failed");
+              break;
+            }
+          }
+          if (slackOk) results.push("slack:ok");
+        } catch (e) {
+          console.error("[api/notify/analyst] slack exception:", e.message || e);
+          results.push("slack:" + (e.message || String(e)));
+        }
+      }
+    }
+
+    if (wantsJira) {
+      const key = String(jiraIssueKey).toUpperCase().replace(/\s/g, "");
+      if (!listConfiguredJiraBases().length || !JIRA_EMAIL || !JIRA_TOKEN) {
+        results.push("jira:skipped_not_configured");
+      } else {
+        try {
+          let jiraBase;
+          try {
+            jiraBase = resolveJiraBaseFromIssueKey(key, { jiraSite, jiraBaseUrl });
+          } catch (e) {
+            results.push("jira:" + (e.message || "resolve_failed"));
+            jiraBase = null;
+          }
+          if (!jiraBase) {
+            /* already pushed error */
+          } else {
+            const md = `## ${subj}\n\n${text}\n\n_${stamp}_`;
+            const commentUrl = `${jiraBase}/rest/api/3/issue/${key}/comment`;
+            const r = await fetch(commentUrl, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                Authorization: jiraAuthHeader(),
+              },
+              body: JSON.stringify(markdownToJiraAdf(md)),
+            });
+            const data = await r.json().catch(() => ({}));
+            if (!r.ok) {
+              console.error("[api/notify/analyst] jira failed:", data.errorMessages?.[0] || r.statusText);
+              results.push("jira:failed");
+            } else {
+              results.push("jira:ok");
+            }
+          }
+        } catch (e) {
+          console.error("[api/notify/analyst] jira exception:", e.message || e);
+          results.push("jira:" + (e.message || String(e)));
         }
       }
     }

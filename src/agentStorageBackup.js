@@ -12,6 +12,7 @@ export const AGENT_LOCAL_STORAGE_KEYS = [
   "brdforge-feedback-memory",
   "jira-agent-history-v1",
   "publish-defaults-v1",
+  "agent-run-artifacts-v1",
 ];
 
 export function collectAgentLocalStorage() {

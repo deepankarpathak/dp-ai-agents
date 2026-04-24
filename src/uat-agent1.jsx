@@ -4,6 +4,8 @@ import ShareAndScore from "./ShareAndScore.jsx";
 import { syncPublishDefaultJiraKey, loadPublishDefaults, syncPublishJiraSiteFromIssue, getLlmProviderForRequest, getLlmDisabledForRequest, getBedrockModelTierForRequest } from "./ConnectorsStatus.jsx";
 import { exportAgentOutput } from "./agentExport.js";
 import { buildShareSubjectLine } from "./shareSubject.js";
+import AgentDomainMultiSelect from "./AgentDomainMultiSelect.jsx";
+import { AGENT_DOMAIN_ENTRIES, domainIdsFromLabels, sanitizeDomainIds } from "./agentDomainCatalog.js";
 
 // ── Google Font ───────────────────────────────────────────────────────────────
 const fontLink = document.createElement("link");
@@ -37,17 +39,6 @@ const MODELS = [
   { id: "gpt-4o",                   label: "GPT-4o",            provider: "OpenAI",    color: "#10a37f" },
   { id: "gemini-1.5-pro",           label: "Gemini 1.5 Pro",    provider: "Google",    color: "#4285f4" },
   { id: "deepseek-chat",            label: "DeepSeek Chat",     provider: "DeepSeek",  color: "#7c3aed" },
-];
-
-const DOMAINS = [
-  { id: "pms",            label: "PMS",            full: "Profile Management System", icon: "👤", color: "#60a5fa" },
-  { id: "switch",         label: "Switch",          full: "Transactional Switch",       icon: "🔀", color: "#e8b84b" },
-  { id: "refund",         label: "Refund",          full: "Refund Service",             icon: "↩️", color: "#f87171" },
-  { id: "reconciliation", label: "Reconciliation",  full: "Reconciliation Service",     icon: "⚖️", color: "#a78bfa" },
-  { id: "payout",         label: "Payout",          full: "Payout Service",             icon: "💸", color: "#34d399" },
-  { id: "compliance",     label: "Compliance",      full: "Compliance Service",         icon: "🛡️", color: "#fbbf24" },
-  { id: "mandates",       label: "Mandates",        full: "Mandates Service",           icon: "📋", color: "#22d3ee" },
-  { id: "all",            label: "All Services",    full: "All Services",               icon: "🌐", color: "#94a3b8" },
 ];
 
 // ── System Prompts ────────────────────────────────────────────────────────────
@@ -403,36 +394,6 @@ function ModelPicker({ selected, onChange }) {
   );
 }
 
-function DomainSelector({ selected, onChange }) {
-  const toggle = (id) => {
-    if (id==="all") { onChange(selected.includes("all")?[]:["all"]); return; }
-    const next = selected.filter(s=>s!=="all");
-    onChange(next.includes(id)?next.filter(s=>s!==id):[...next,id]);
-  };
-  return (
-    <div style={{ display:"flex", flexWrap:"wrap", gap:9 }}>
-      {DOMAINS.map(d=>{
-        const on = selected.includes(d.id);
-        return (
-          <button type="button" key={d.id} onClick={()=>toggle(d.id)} style={{
-            background: on?`${d.color}18`:C.surface, border:`2px solid ${on?d.color:C.border}`,
-            borderRadius:10, padding:"9px 15px", cursor:"pointer",
-            display:"flex", alignItems:"center", gap:8, fontFamily:C.font, outline:"none",
-            transition:"all 0.15s"
-          }}>
-            <span style={{ fontSize:15 }}>{d.icon}</span>
-            <div style={{ textAlign:"left" }}>
-              <div style={{ fontSize:12, fontWeight:700, color:on?d.color:C.subtle, lineHeight:1.3 }}>{d.label}</div>
-              <div style={{ fontSize:10, color:on?`${d.color}aa`:C.muted, lineHeight:1.2 }}>{d.full}</div>
-            </div>
-            {on && <span style={{ color:d.color, fontSize:12, marginLeft:2 }}>✓</span>}
-          </button>
-        );
-      })}
-    </div>
-  );
-}
-
 function Spinner() {
   return <div style={{ width:16, height:16, border:`2px solid ${C.border}`, borderTopColor:C.gold, borderRadius:"50%", animation:"spin 0.7s linear infinite", display:"inline-block" }}/>;
 }
@@ -473,7 +434,7 @@ export default function TestSentinel() {
   const [statusMsg, setStatusMsg] = useState("");
 
   // Inputs
-  const [selectedDomains, setSelectedDomains] = useState([]);
+  const [selectedDomains, setSelectedDomains] = useState(["switch"]);
   const [jiraSubject, setJiraSubject] = useState("");
   const [jiraDesc, setJiraDesc] = useState("");
   const [jiraMode, setJiraMode] = useState("type");
@@ -572,7 +533,7 @@ export default function TestSentinel() {
   const removeFile = (i, setF, setC) => { setF(p=>p.filter((_,j)=>j!==i)); setC(p=>p.filter((_,j)=>j!==i)); };
 
   const buildContext = () => {
-    const doms = DOMAINS.filter(d=>selectedDomains.includes(d.id));
+    const doms = AGENT_DOMAIN_ENTRIES.filter((d) => selectedDomains.includes(d.id));
     const scope = doms.map(d=>d.full).join(", ")||"All Services";
     let ctx = `UAT Scope: ${scope}\n\n`;
     if (jiraMode==="type") { if(jiraSubject) ctx+=`JIRA Subject: ${jiraSubject}\n`; if(jiraDesc) ctx+=`JIRA Description:\n${jiraDesc}\n\n`; }
@@ -649,14 +610,15 @@ export default function TestSentinel() {
       if (clarifyAnswers.trim()) userMsg += `\nClarification Answers:\n${clarifyAnswers}\n`;
       if (feedbackMemory.length > 0) userMsg += `\nREMEMBERED FEEDBACK FROM PREVIOUS UATs (apply these improvements):\n${feedbackMemory.map(f => `- ${f}`).join("\n")}\n`;
       userMsg = truncateForLLM(userMsg, MAX_GENERATE_USER_CHARS);
-      const domains = DOMAINS.filter(d=>selectedDomains.includes(d.id));
+      const domains = AGENT_DOMAIN_ENTRIES.filter((d) => selectedDomains.includes(d.id));
       const signoff = await callClaude(buildSystemPrompt(domains, editedObjective, ""), userMsg);
       const jiraKey = parseJiraIssueKey(jiraIssueKey) || parseJiraIssueKey(jiraSubject);
       const entry = saveToHistory({
         jira: jiraSubject||jiraFiles[0]?.name||"Unnamed",
         jiraKey,
         model: MODELS.find(m=>m.id===model)?.label||model,
-        domains: domains.map(d=>d.label),
+        domains: domains.map((d) => d.label),
+        selectedDomainIds: [...selectedDomains],
         objective: editedObjective,
         signoff
       });
@@ -669,6 +631,12 @@ export default function TestSentinel() {
         jiraId: jiraKey || "NOJIRA",
         subject: jiraSubject || "UAT-Signoff",
         content: signoff,
+        steps: [
+          "Build UAT context (JIRA attachments, domains, objective)",
+          "LLM: UAT signoff document",
+          "Save to UAT history",
+        ],
+        input: userMsg,
       });
       setAllowAutoPublish(true);
       if (!hasSentNotifyRef.current) {
@@ -692,7 +660,7 @@ export default function TestSentinel() {
       if (feedbackMode==="type") fbCtx += feedbackText;
       else feedbackFC.forEach(f=>{ fbCtx+=`[File: ${f.name}]\n${f.content}\n`; });
       fbCtx = truncateForLLM(fbCtx, MAX_FEEDBACK_USER_CHARS);
-      const domains = DOMAINS.filter(d=>result.domains?.includes(d.label));
+      const domains = AGENT_DOMAIN_ENTRIES.filter((d) => result.domains?.includes(d.label));
       const improved = await callClaude(buildSystemPrompt(domains, editedObjective, feedbackText||"(see attached feedback)"), fbCtx);
       const jiraKey = parseJiraIssueKey(jiraIssueKey) || parseJiraIssueKey(jiraSubject);
       const entry = saveToHistory({
@@ -700,6 +668,7 @@ export default function TestSentinel() {
         jiraKey,
         model: MODELS.find(m=>m.id===model)?.label||model,
         domains: result.domains||[],
+        selectedDomainIds: [...selectedDomains],
         objective: editedObjective,
         signoff: improved
       });
@@ -709,6 +678,12 @@ export default function TestSentinel() {
         jiraId: jiraKey || "NOJIRA",
         subject: (jiraSubject || "UAT-Signoff") + "-revised",
         content: improved,
+        steps: [
+          "Apply user feedback to prior signoff",
+          "LLM: revised UAT signoff",
+          "Update UAT history",
+        ],
+        input: fbCtx,
       });
       const fbSummary = feedbackMode === "type" ? feedbackText.trim() : feedbackFC.map(f => `[${f.name}] ${f.content.slice(0, 100)}`).join("; ");
       if (fbSummary) setFeedbackMemory(prev => [...prev, fbSummary.slice(0, 200)].slice(-20));
@@ -729,7 +704,7 @@ export default function TestSentinel() {
   const resetAll = () => {
     setStep(0); setJiraSubject(""); setJiraDesc(""); setJiraFiles([]); setJiraFC([]);
     setTestCases(""); setTestFiles([]); setTestFC([]); setDocsText(""); setDocsFiles([]); setDocsFC([]);
-    setSelectedDomains([]); setClarifyRaw(""); setDraftObjective(""); setEditedObjective("");
+    setSelectedDomains(["switch"]); setClarifyRaw(""); setDraftObjective(""); setEditedObjective("");
     setClarifyAnswers(""); setResult(null); setStatusMsg(""); setFeedbackText(""); setFeedbackFiles([]); setFeedbackFC([]);
     setJiraMode("type"); setTestMode("type"); setDocsMode("type"); setFeedbackMode("type");
     setJiraIssueKey(""); setJiraFetchError("");
@@ -785,7 +760,7 @@ export default function TestSentinel() {
       <Card style={{ marginBottom:18 }}>
         <SectionHeader icon="🎯" title="Supported UAT Domains" />
         <div style={{ padding:18, display:"flex", flexWrap:"wrap", gap:8 }}>
-          {DOMAINS.filter(d=>d.id!=="all").map(d=>(
+          {AGENT_DOMAIN_ENTRIES.map((d) => (
             <div key={d.id} style={{ display:"flex", alignItems:"center", gap:6, background:`${d.color}12`, border:`1px solid ${d.color}22`, borderRadius:7, padding:"6px 12px" }}>
               <span>{d.icon}</span>
               <span style={{ fontSize:11, color:d.color, fontWeight:700, fontFamily:C.font }}>{d.label}</span>
@@ -864,15 +839,13 @@ export default function TestSentinel() {
             <SectionHeader icon="🎯" title="UAT Domain Scope" tag="Required" tagColor="#f87171"/>
             <div style={{ padding:18 }}>
               <p style={{ fontSize:12, color:C.muted, margin:"0 0 14px", fontFamily:C.font }}>Select domains to scope this UAT. The signoff will be strictly constrained to your selection.</p>
-              <DomainSelector selected={selectedDomains} onChange={setSelectedDomains}/>
-              {selectedDomains.length>0 && (
-                <div style={{ marginTop:12, padding:"9px 14px", background:C.surface, borderRadius:7, border:`1px solid ${C.border}`, display:"flex", flexWrap:"wrap", gap:6, alignItems:"center" }}>
-                  <span style={{ fontSize:11, color:C.muted, fontFamily:C.mono }}>Active scope:</span>
-                  {DOMAINS.filter(d=>selectedDomains.includes(d.id)).map(d=>(
-                    <span key={d.id} style={{ color:d.color, fontSize:11, fontWeight:700, fontFamily:C.font }}>{d.icon} {d.full}</span>
-                  ))}
-                </div>
-              )}
+              <AgentDomainMultiSelect
+                label="Domains"
+                value={selectedDomains}
+                onChange={setSelectedDomains}
+                domains={AGENT_DOMAIN_ENTRIES}
+                colors={{ surface: C.surface, elevated: C.elevated, border: C.border, text: C.text, muted: C.muted, accent: C.gold }}
+              />
             </div>
           </Card>
 
@@ -1015,7 +988,7 @@ export default function TestSentinel() {
             <div style={{ padding:18 }}>
               <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:14, marginBottom:16 }}>
                 {[
-                  { label:"Domains", value: DOMAINS.filter(d=>selectedDomains.includes(d.id)).map(d=>`${d.icon} ${d.label}`).join(", ")||"—" },
+                  { label:"Domains", value: AGENT_DOMAIN_ENTRIES.filter((d) => selectedDomains.includes(d.id)).map((d) => `${d.icon} ${d.label}`).join(", ")||"—" },
                   { label:"JIRA", value: jiraSubject||(jiraFiles[0]?.name)||"From uploaded file" },
                   { label:"Test Cases", value: testCases ? `${testCases.split("\n").filter(Boolean).length} lines pasted` : testFiles.length>0 ? `${testFiles.length} file(s)` : "—" },
                   { label:"Supporting Docs", value: docsText?"Text provided":docsFiles.length>0?`${docsFiles.length} file(s)`:"—" },
@@ -1158,6 +1131,11 @@ export default function TestSentinel() {
                       setJiraSubject(typeof h.jira === "string" ? h.jira : "");
                       if (h.jiraKey) setJiraIssueKey(String(h.jiraKey));
                       setEditedObjective(h.objective || "");
+                      if (Array.isArray(h.selectedDomainIds) && h.selectedDomainIds.length) {
+                        setSelectedDomains(sanitizeDomainIds(h.selectedDomainIds));
+                      } else {
+                        setSelectedDomains(domainIdsFromLabels(h.domains));
+                      }
                       setStep(3);
                       setResult({ signoff: h.signoff, id: h.id, domains: h.domains || [] });
                       setView("result");
@@ -1170,7 +1148,10 @@ export default function TestSentinel() {
                         </div>
                         <div style={{ display:"flex", gap:7, flexWrap:"wrap" }}>
                           <Tag color={C.muted}>{h.model}</Tag>
-                          {h.domains?.map(d=>{ const dom=DOMAINS.find(x=>x.label===d); return <Tag key={d} color={dom?.color||C.muted}>{dom?.icon} {d}</Tag>; })}
+                          {h.domains?.map((d) => {
+                            const dom = AGENT_DOMAIN_ENTRIES.find((x) => x.label === d);
+                            return <Tag key={d} color={dom?.color || C.muted}>{dom?.icon} {d}</Tag>;
+                          })}
                         </div>
                         {h.objective && <div style={{ marginTop:8, fontSize:11, color:C.muted, fontFamily:C.mono, lineHeight:1.5 }}>Objective: {h.objective.slice(0,120)}{h.objective.length>120?"...":""}</div>}
                       </div>

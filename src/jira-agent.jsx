@@ -13,58 +13,22 @@ import {
 import { exportAgentOutput } from "./agentExport.js";
 import { buildShareSubjectLine } from "./shareSubject.js";
 import { buildAgentPrefaceContext } from "./agentContextPipeline.js";
+import AgentDomainMultiSelect from "./AgentDomainMultiSelect.jsx";
+import {
+  domainLabelsForDisplay,
+  domainsHaveMixedJiraSites,
+  issueLabelsForJiraCreate,
+  jiraBaseUrlForDomains,
+  jiraComponentNamesForDomainIds,
+  projectKeyFromDomains,
+  sanitizeDomainIds,
+} from "./agentDomainCatalog.js";
 
 const MODELS = [
   { id: "claude-sonnet-4-20250514", label: "Sonnet 4.6", color: "#F59E0B" },
   { id: "claude-opus-4-20250514", label: "Opus 4.6", color: "#A78BFA" },
   { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5", color: "#34D399" },
 ];
-
-const DOMAINS = [
-  { id: "switch", label: "Switch", icon: "🔀", color: "#e8b84b" },
-  { id: "pms", label: "PMS", icon: "👤", color: "#60a5fa" },
-  { id: "compliance", label: "Compliance", icon: "🛡️", color: "#fbbf24" },
-  { id: "refund", label: "Refund", icon: "↩️", color: "#f87171" },
-  { id: "reconciliation", label: "Reconciliation", icon: "⚖️", color: "#a78bfa" },
-  { id: "mandates", label: "Mandates", icon: "📜", color: "#f472b6" },
-  { id: "payout", label: "Payout", icon: "💸", color: "#34d399" },
-  { id: "combination", label: "Combination", icon: "🔗", color: "#fb923c" },
-  { id: "app", label: "App", icon: "📱", color: "#38bdf8" },
-  { id: "mis", label: "MIS", icon: "📊", color: "#c084fc" },
-  { id: "all", label: "All", icon: "🌐", color: "#94a3b8" },
-];
-
-/** UI domain id → JIRA `labels` value on create (unlisted domains: no label). */
-const DOMAIN_ID_TO_JIRA_LABEL = {
-  switch: "Transaction",
-  pms: "PMS",
-  compliance: "ComplianceService",
-  refund: "Refund",
-  reconciliation: "Recon",
-  mandates: "mandate",
-};
-
-function jiraLabelsFromDomainIds(domainSet) {
-  if (!domainSet || !(domainSet instanceof Set)) return [];
-  const ids = [...domainSet];
-  const out = new Set();
-  if (ids.includes("all")) {
-    Object.values(DOMAIN_ID_TO_JIRA_LABEL).forEach((l) => out.add(l));
-    return [...out];
-  }
-  for (const id of ids) {
-    const lab = DOMAIN_ID_TO_JIRA_LABEL[id];
-    if (lab) out.add(lab);
-  }
-  return [...out];
-}
-
-function domainDisplayNamesForNotify(domainSet) {
-  if (!domainSet || !(domainSet instanceof Set)) return [];
-  const ids = [...domainSet];
-  if (ids.includes("all")) return DOMAINS.filter((d) => d.id !== "all").map((d) => d.label);
-  return DOMAINS.filter((d) => ids.includes(d.id) && d.id !== "all").map((d) => d.label);
-}
 
 function linkedJiraKeysFromHistoryItem(item) {
   if (item?.linkedJiraKeys?.length) return item.linkedJiraKeys;
@@ -534,8 +498,11 @@ export default function JiraAgent() {
   const hasSentNotifyRef = useRef(false);
   const [openSubtaskIndex, setOpenSubtaskIndex] = useState(null);
 
-  const jiraLabelsForCreate = useMemo(() => jiraLabelsFromDomainIds(selectedDomains), [selectedDomains]);
-  const notifyDomainLabelsForCreate = useMemo(() => domainDisplayNamesForNotify(selectedDomains), [selectedDomains]);
+  const selectedDomainIdsArr = useMemo(() => [...selectedDomains], [selectedDomains]);
+  const jiraLabelsForCreate = useMemo(() => issueLabelsForJiraCreate(selectedDomainIdsArr), [selectedDomainIdsArr]);
+  const notifyDomainLabelsForCreate = useMemo(() => domainLabelsForDisplay(selectedDomainIdsArr), [selectedDomainIdsArr]);
+  const jiraBaseFromDomains = useMemo(() => jiraBaseUrlForDomains(selectedDomainIdsArr), [selectedDomainIdsArr]);
+  const mixedJiraSites = useMemo(() => domainsHaveMixedJiraSites(selectedDomainIdsArr), [selectedDomainIdsArr]);
 
   const patchHistoryJiraCreated = useCallback((snapshot) => {
     const anchor = historyAnchorRef.current;
@@ -588,27 +555,7 @@ export default function JiraAgent() {
   const jiraCreatedKey = createdBundle?.parentKey || "";
   const displayTitle = featureName.trim() || docTitle || "JIRA Ticket";
 
-  const toggleDomain = (id) => {
-    setSelectedDomains((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) {
-        if (next.size <= 1) return next;
-        next.delete(id);
-      } else {
-        next.add(id);
-      }
-      return next;
-    });
-  };
-
-  const domainLabels = useMemo(
-    () =>
-      [...selectedDomains]
-        .map((id) => DOMAINS.find((d) => d.id === id)?.label)
-        .filter(Boolean)
-        .join(", "),
-    [selectedDomains]
-  );
+  const domainLabels = useMemo(() => domainLabelsForDisplay([...selectedDomains]).join(", "), [selectedDomains]);
 
   const buildContext = () => {
     const parts = [];
@@ -686,7 +633,8 @@ export default function JiraAgent() {
     try {
       const form = new FormData();
       form.append("issueKey", key);
-      if (jiraWriteSite !== "auto") form.append("jiraSite", jiraWriteSite);
+      if (jiraBaseFromDomains) form.append("jiraBaseUrl", jiraBaseFromDomains);
+      else if (jiraWriteSite !== "auto") form.append("jiraSite", jiraWriteSite);
       files.forEach((f) => form.append("files", f.file, f.name));
       const r = await fetch(`${API_BASE}/api/jira/attach`, { method: "POST", body: form });
       const d = await r.json().catch(() => ({}));
@@ -738,7 +686,9 @@ export default function JiraAgent() {
     setIssueTypesError("");
     try {
       const qs = new URLSearchParams({ projectKey: pk });
-      if (jiraWriteSite !== "auto") qs.set("jiraSite", jiraWriteSite);
+      const baseFromDomains = jiraBaseUrlForDomains([...selectedDomains]);
+      if (baseFromDomains) qs.set("jiraBaseUrl", baseFromDomains);
+      else if (jiraWriteSite !== "auto") qs.set("jiraSite", jiraWriteSite);
       const r = await fetch(`${API_BASE}/api/jira/issue-types?${qs}`);
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
@@ -760,7 +710,7 @@ export default function JiraAgent() {
   useEffect(() => {
     setIssueTypeId("");
     setIssueTypes([]);
-  }, [projectKey, jiraWriteSite]);
+  }, [projectKey, jiraWriteSite, jiraBaseFromDomains]);
 
   const handleClarify = async () => {
     const filePromptText = contextFiles.some((f) => f.includeInPrompt && String(f.extractedText || "").trim());
@@ -857,6 +807,12 @@ export default function JiraAgent() {
         jiraId: derivedJiraKey || "NOJIRA",
         subject: displayTitle,
         content: md + (nextSubs.length ? `\n\n---\n## Proposed sub-JIRAs\n${JSON.stringify(nextSubs, null, 2)}` : ""),
+        steps: [
+          "Gather feature, project, domains, and requirements",
+          "LLM: JIRA description + AC + subtasks proposal",
+          "Save draft to JIRA Agent history",
+        ],
+        input: [featureName, projectKey, objective, requirement].filter(Boolean).join("\n\n"),
       });
       if (!hasSentNotifyRef.current) {
         hasSentNotifyRef.current = true;
@@ -908,6 +864,7 @@ export default function JiraAgent() {
     setCreating(true);
     setStatusMsg("Creating JIRA issue…");
     try {
+      const dIds = [...selectedDomains];
       const data = await apiJson("/api/jira/create", {
         projectKey: pk,
         issueType,
@@ -917,7 +874,12 @@ export default function JiraAgent() {
         devAssignee: resolvedDevAssignee,
         labels: jiraLabelsForCreate,
         notifyDomainLabels: notifyDomainLabelsForCreate,
-        ...(jiraWriteSite !== "auto" ? { jiraSite: jiraWriteSite } : {}),
+        domainIds: dIds,
+        components: jiraComponentNamesForDomainIds(dIds),
+        ...(jiraBaseFromDomains ? { jiraBaseUrl: jiraBaseFromDomains } : jiraWriteSite !== "auto" ? { jiraSite: jiraWriteSite } : {}),
+        timetracking: "1d",
+        timetracking_originalestimate: "1d",
+        timetracking_remainingestimate: "1d",
       });
       setCreatedBundle({ parentKey: data.key, parentBrowseUrl: data.browseUrl || "", subtasks: [] });
       setJiraIssueKey(data.key || "");
@@ -961,12 +923,18 @@ export default function JiraAgent() {
     setCreating(true);
     setStatusMsg("Creating parent and sub-JIRAs…");
     try {
+      const dIds = [...selectedDomains];
       const data = await apiJson("/api/jira/create-with-subtasks", {
         projectKey: pk,
         devAssignee: resolvedDevAssignee,
         labels: jiraLabelsForCreate,
         notifyDomainLabels: notifyDomainLabelsForCreate,
-        ...(jiraWriteSite !== "auto" ? { jiraSite: jiraWriteSite } : {}),
+        domainIds: dIds,
+        components: jiraComponentNamesForDomainIds(dIds),
+        ...(jiraBaseFromDomains ? { jiraBaseUrl: jiraBaseFromDomains } : jiraWriteSite !== "auto" ? { jiraSite: jiraWriteSite } : {}),
+        timetracking: "1d",
+        timetracking_originalestimate: "1d",
+        timetracking_remainingestimate: "1d",
         parent: {
           summary,
           description: resultMd,
@@ -1041,11 +1009,17 @@ export default function JiraAgent() {
   const loadFromHistory = (item) => {
     historyAnchorRef.current = item.id;
     setFeatureName(item.featureName || "");
-    setProjectKey(item.projectKey || "");
+    const pkStored = String(item.projectKey || "").trim().toUpperCase();
+    setProjectKey(pkStored);
     setIssueType(item.issueType || "Task");
     setIssueTypeId(item.issueTypeId || "");
     if (Array.isArray(item.selectedDomains) && item.selectedDomains.length) {
-      setSelectedDomains(new Set(item.selectedDomains));
+      const ids = sanitizeDomainIds(item.selectedDomains);
+      setSelectedDomains(new Set(ids));
+      if (!pkStored) {
+        const pk = projectKeyFromDomains(ids);
+        if (pk) setProjectKey(pk);
+      }
     }
     setObjective(item.objective || "");
     setRequirement(item.requirement || "");
@@ -1449,31 +1423,22 @@ export default function JiraAgent() {
           </div>
 
           <div style={{ marginTop: 14 }}>
-            <div style={{ fontSize: 10, color: "#64748b", textTransform: "uppercase", marginBottom: 8 }}>Domains (multi-select)</div>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-              {DOMAINS.map((d) => (
-                <button
-                  key={d.id}
-                  type="button"
-                  onClick={() => toggleDomain(d.id)}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 6,
-                    padding: "6px 10px",
-                    borderRadius: 8,
-                    border: selectedDomains.has(d.id) ? `1px solid ${d.color}` : "1px solid #1E293B",
-                    background: selectedDomains.has(d.id) ? `${d.color}18` : "#0B1220",
-                    color: selectedDomains.has(d.id) ? d.color : "#64748b",
-                    fontSize: 11,
-                    fontWeight: 600,
-                    cursor: "pointer",
-                  }}
-                >
-                  <span>{d.icon}</span> {d.label}
-                </button>
-              ))}
-            </div>
+            <AgentDomainMultiSelect
+              label="Domains"
+              value={[...selectedDomains]}
+              onChange={(ids) => {
+                setSelectedDomains(new Set(ids));
+                const pk = projectKeyFromDomains(ids);
+                if (pk) setProjectKey(pk);
+              }}
+              colors={{ surface: "#0B1220", elevated: "#111827", border: "#1E293B", text: "#E2E8F0", muted: "#64748b", accent: "#38bdf8" }}
+            />
+            {mixedJiraSites && (
+              <div style={{ marginTop: 10, fontSize: 11, color: "#fbbf24", maxWidth: 640 }}>
+                Selected domains map to different JIRA sites (TSP → finmate.atlassian.net, others → mypaytm.atlassian.net). Create / issue-types use the{" "}
+                <strong>first</strong> selected domain’s site and project key — adjust selection order or project key if needed.
+              </div>
+            )}
           </div>
 
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>

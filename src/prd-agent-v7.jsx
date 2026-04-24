@@ -624,6 +624,14 @@ export default function PRDAgent() {
           jiraId: jid || "NOJIRA",
           subject: fullPrd.title || "PRD",
           content: buildMd(fullPrd),
+          steps: [
+            "Context: session history + /docs preface",
+            "LLM: document title/version metadata",
+            "LLM: batched PRD section generation",
+            "Persist PRD to local history",
+            skipClarify ? "Skip clarify — complete" : "Enter clarification phase",
+          ],
+          input: req,
         });
       }
 
@@ -694,6 +702,12 @@ export default function PRDAgent() {
         jiraId: jidRefined || "NOJIRA",
         subject: (refined.title || "PRD") + "-refined",
         content: buildMd(refined),
+        steps: [
+          "Apply clarification answers and remembered feedback",
+          "LLM: refine PRD in section batches",
+          "Update session history",
+        ],
+        input: [req, clarBlock].filter(Boolean).join("\n\n---\n\n"),
       });
       setAllowAutoPublish(true);
       if (!hasSentNotifyRef.current) {
@@ -771,6 +785,12 @@ export default function PRDAgent() {
           jiraId: jid || "NOJIRA",
           subject: (improved.title || "PRD") + "-improved",
           content: buildMd(improved),
+          steps: [
+            "Apply preset + manual feedback to existing PRD",
+            "LLM: improve PRD in section batches",
+            "Update session history",
+          ],
+          input: [combined, convHistory[0]?.content || input].filter(Boolean).join("\n\n---\n\n"),
         });
       }
       setAllowAutoPublish(true);
