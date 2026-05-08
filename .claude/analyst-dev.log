@@ -1,0 +1,125 @@
+
+--- 2026-05-06T11:41:09.500Z run dev:analyst ---
+
+> ai-agents-frontend@1.0.0 dev:analyst
+> env-cmd -f .env -- npm run dev --prefix Query_Agent
+
+
+> query-agent@0.1.0 dev
+> next dev -p 3040
+
+   ▲ Next.js 15.5.12
+   - Local:        http://localhost:3040
+   - Network:      http://10.11.24.14:3040
+   - Environments: .env.local
+
+ ✓ Starting...
+ ✓ Ready in 3s
+ ○ Compiling / ...
+ ✓ Compiled / in 3.1s (851 modules)
+ GET / 200 in 3782ms
+ ○ Compiling /api/auth/[...nextauth] ...
+ ✓ Compiled /api/auth/[...nextauth] in 981ms (1078 modules)
+ GET /api/auth/session 200 in 2082ms
+ GET / 200 in 529ms
+ GET /api/auth/session 200 in 58ms
+ GET / 200 in 339ms
+ ○ Compiling /middleware ...
+ ✓ Compiled /middleware in 1350ms (114 modules)
+[analyst-api] GET /api/auth/session
+ GET /api/auth/session 200 in 53ms
+ GET / 200 in 200ms
+[analyst-api] GET /api/auth/session
+ GET /api/auth/session 200 in 55ms
+[analyst-api] GET /api/auth/session
+ GET /api/auth/session 200 in 16ms
+[analyst-api] GET /api/auth/session
+ GET /api/auth/session 200 in 33ms
+[analyst-api] GET /api/auth/session
+ GET /api/auth/session 200 in 44ms
+[analyst-api] GET /api/auth/session
+ GET /api/auth/session 200 in 23ms
+[analyst-api] GET /api/auth/session
+ GET /api/auth/session 200 in 70ms
+[analyst-api] GET /api/auth/session
+ GET /api/auth/session 200 in 346ms
+[analyst-api] POST /api/generate
+ ○ Compiling /api/generate ...
+ ✓ Compiled /api/generate in 1098ms (1111 modules)
+ POST /api/generate 200 in 34847ms
+(node:87326) [DEP0060] DeprecationWarning: The `util._extend` API is deprecated. Please use Object.assign() instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+[analyst-api] POST /api/run
+ ✓ Compiled /api/run in 327ms (878 modules)
+{"level":"info","component":"analyst/trino-run","ts":"2026-05-06T14:51:06.795Z","trinoHost":"cdp-trino-query.platform.mypaytm.com","serviceUserDomain":"paytm.com","clientRunAs":"deepankar.pathak@finmate.tech","effectiveRunAs":"deepankar.pathak@finmate.tech","executeAsOverride":true,"impersonationHeaders":false,"xTrinoUserMode":"basic-user-explicit-like-python-script"}
+ POST /api/run 200 in 3628ms
+[analyst-api] GET /api/auth/session
+ ○ Compiling /api/auth/[...nextauth] ...
+ ✓ Compiled /api/auth/[...nextauth] in 2.5s (690 modules)
+ GET /api/auth/session 200 in 3102ms
+[analyst-api] GET /api/auth/session
+ GET /api/auth/session 200 in 91ms
+[analyst-api] GET /api/auth/session
+ GET /api/auth/session 200 in 150ms
+[analyst-api] GET /api/auth/session
+ GET /api/auth/session 200 in 104ms
+[analyst-api] GET /api/auth/session
+ GET /api/auth/session 200 in 54ms
+[analyst-api] GET /api/auth/session
+ GET /api/auth/session 200 in 67ms
+[analyst-api] GET /api/auth/session
+ GET /api/auth/session 200 in 51ms
+[analyst-api] GET /api/auth/session
+ GET /api/auth/session 200 in 138ms
+[analyst-api] GET /api/auth/session
+ GET /api/auth/session 200 in 71ms
+[analyst-api] GET /api/auth/session
+ GET /api/auth/session 200 in 89ms
+[analyst-api] GET /api/auth/session
+ GET /api/auth/session 200 in 77ms
+[analyst-api] GET /api/auth/session
+ GET /api/auth/session 200 in 37ms
+[analyst-api] GET /api/auth/session
+ GET /api/auth/session 200 in 49ms
+[analyst-api] GET /api/auth/session
+ GET /api/auth/session 200 in 32ms
+[analyst-api] GET /api/auth/session
+ GET /api/auth/session 200 in 74ms
+[analyst-api] GET /api/auth/session
+ GET /api/auth/session 200 in 27ms
+[analyst-api] GET /api/auth/session
+ GET /api/auth/session 200 in 36ms
+[analyst-api] GET /api/auth/session
+ GET /api/auth/session 200 in 50ms
+[analyst-api] GET /api/auth/session
+ GET /api/auth/session 200 in 37ms
+[analyst-api] GET /api/auth/session
+ GET /api/auth/session 200 in 62ms
+[analyst-api] GET /api/auth/session
+ GET /api/auth/session 200 in 49ms
+[analyst-api] GET /api/auth/session
+ GET /api/auth/session 200 in 27ms
+[analyst-api] GET /api/auth/session
+ GET /api/auth/session 200 in 48ms
+[analyst-api] GET /api/auth/session
+ GET /api/auth/session 200 in 51ms
+[analyst-api] GET /api/auth/session
+ GET /api/auth/session 200 in 58ms
+[analyst-api] GET /api/auth/session
+ GET /api/auth/session 200 in 57ms
+[analyst-api] GET /api/auth/session
+ GET /api/auth/session 200 in 48ms
+[analyst-api] GET /api/auth/session
+ GET /api/auth/session 200 in 22ms
+[analyst-api] GET /api/auth/session
+ GET /api/auth/session 200 in 129ms
+[analyst-api] GET /api/auth/session
+ GET /api/auth/session 200 in 44ms
+[analyst-api] GET /api/auth/session
+ GET /api/auth/session 200 in 78ms
+[analyst-api] GET /api/auth/session
+ GET /api/auth/session 200 in 48ms
+[analyst-api] GET /api/auth/session
+ GET /api/auth/session 200 in 135ms
+[analyst-api] GET /api/auth/session
+ GET /api/auth/session 200 in 596ms

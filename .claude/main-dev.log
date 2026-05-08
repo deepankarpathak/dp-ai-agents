@@ -1,0 +1,156 @@
+
+--- 2026-05-06T11:42:21.341Z run dev ---
+
+> ai-agents-frontend@1.0.0 dev
+> concurrently -n backend,frontend -c blue,green "npm run start:backend" "BROWSER=none DANGEROUSLY_DISABLE_HOST_CHECK=true npm start"
+
+[frontend] 
+[frontend] > ai-agents-frontend@1.0.0 start
+[frontend] > DANGEROUSLY_DISABLE_HOST_CHECK=true react-scripts start
+[frontend] 
+[backend] 
+[backend] > ai-agents-frontend@1.0.0 start:backend
+[backend] > cd backend && npm run start
+[backend] 
+[backend] 
+[backend] > ai-agents-backend@1.0.0 start
+[backend] > node server.js
+[backend] 
+[frontend] (node:87874) [DEP0176] DeprecationWarning: fs.F_OK is deprecated, use fs.constants.F_OK instead
+[frontend] (Use `node --trace-deprecation ...` to show where the warning was created)
+[frontend] Something is already running on port 3000.
+[frontend] BROWSER=none DANGEROUSLY_DISABLE_HOST_CHECK=true npm start exited with code 0
+[backend] [PDF] Loaded reference doc, length: 108594
+[backend] AI agents backend (ai-agents-backend) running on port 5000 [development]
+[backend] [bedrock] startup: checking configuration...
+[backend] [bedrock] mode=http-gateway url configured= true
+[backend] [bedrock] running readiness probe...
+[backend] [bedrock] readiness probe succeeded; sample: "OK"
+[backend] npm run start:backend exited with code 0
+
+--- 2026-05-06T12:00:27.135Z run dev ---
+
+> ai-agents-frontend@1.0.0 dev
+> concurrently -n backend,frontend -c blue,green "npm run start:backend" "BROWSER=none DANGEROUSLY_DISABLE_HOST_CHECK=true npm start"
+
+[frontend] 
+[frontend] > ai-agents-frontend@1.0.0 start
+[frontend] > DANGEROUSLY_DISABLE_HOST_CHECK=true react-scripts start
+[frontend] 
+[backend] 
+[backend] > ai-agents-frontend@1.0.0 start:backend
+[backend] > cd backend && npm run start
+[backend] 
+[backend] 
+[backend] > ai-agents-backend@1.0.0 start
+[backend] > node server.js
+[backend] 
+[frontend] (node:948) [DEP0176] DeprecationWarning: fs.F_OK is deprecated, use fs.constants.F_OK instead
+[frontend] (Use `node --trace-deprecation ...` to show where the warning was created)
+[frontend] [HPM] Proxy created: /  -> http://127.0.0.1:5000
+[frontend] (node:948) [DEP_WEBPACK_DEV_SERVER_ON_AFTER_SETUP_MIDDLEWARE] DeprecationWarning: 'onAfterSetupMiddleware' option is deprecated. Please use the 'setupMiddlewares' option.
+[frontend] (node:948) [DEP_WEBPACK_DEV_SERVER_ON_BEFORE_SETUP_MIDDLEWARE] DeprecationWarning: 'onBeforeSetupMiddleware' option is deprecated. Please use the 'setupMiddlewares' option.
+[frontend] Starting the development server...
+[frontend] 
+[backend] [PDF] Loaded reference doc, length: 108594
+[backend] AI agents backend (ai-agents-backend) running on port 5000 [development]
+[backend] [bedrock] startup: checking configuration...
+[backend] [bedrock] mode=http-gateway url configured= true
+[backend] [bedrock] running readiness probe...
+[frontend] Compiled successfully!
+[frontend] 
+[frontend] You can now view ai-agents-frontend in the browser.
+[frontend] 
+[frontend]   Local:            http://localhost:3000
+[frontend]   On Your Network:  http://10.11.24.14:3000
+[frontend] 
+[frontend] Note that the development build is not optimized.
+[frontend] To create a production build, use npm run build.
+[frontend] 
+[frontend] webpack compiled successfully
+[backend] [api] GET /api/connectors/status 200 +6ms
+[backend] [api] GET /api/connectors/status 200 +2ms
+[backend] [api] GET /api/connectors/status 200 +2ms
+[backend] [api] GET /api/connectors/status 304 +1ms
+[backend] [bedrock] readiness probe succeeded; sample: "OK"
+[backend] [api] GET /api/config 304 +3ms
+[backend] [api] GET /api/config 304 +0ms
+[backend] [api] GET /api/config 304 +1ms
+[backend] [api] GET /api/config 304 +0ms
+[backend] [api] GET /api/config 304 +1ms
+[backend] [api] GET /api/config 304 +0ms
+[backend] [api] GET /api/config 304 +1ms
+[backend] [api] GET /api/config 304 +0ms
+[backend] [api] GET /api/config 304 +1ms
+[backend] [api] GET /api/config 304 +1ms
+[backend] [api] GET /api/config 304 +0ms
+[backend] [api] GET /api/config 304 +0ms
+[backend] [api] GET /api/config 304 +0ms
+[backend] [api] GET /api/config 304 +0ms
+[backend] [api] GET /api/config 304 +1ms
+[backend] [api] GET /api/config 304 +0ms
+[backend] [api] GET /api/config 304 +0ms
+[backend] [api] GET /api/config 304 +0ms
+[backend] [api] GET /api/config 304 +0ms
+[backend] [api] GET /api/config 304 +0ms
+[backend] [api] GET /api/config 304 +1ms
+[backend] [api] GET /api/config 304 +1ms
+[backend] [api] GET /api/config 304 +2ms
+[backend] [api] GET /api/config 304 +1ms
+[backend] [api] GET /api/config 304 +0ms
+[backend] [api] GET /api/config 304 +0ms
+[backend] [api/generate] provider=aws tier(default) 
+[backend] [api/generate] bedrock resolved model: global.anthropic.claude-sonnet-4-6 (no body model) 
+[backend] [api] POST /api/generate 200 +12543ms
+[backend] [api/generate] provider=aws tier(default) 
+[backend] [api/generate] bedrock resolved model: global.anthropic.claude-sonnet-4-6 (no body model) 
+[backend] [api] POST /api/generate 200 +8878ms
+[backend] [api/generate] provider=aws tier(default) 
+[backend] [api/generate] bedrock resolved model: global.anthropic.claude-sonnet-4-6 (no body model) 
+[backend] [api] POST /api/generate 200 +11141ms
+[backend] [api] POST /api/save-agent-output 200 +2ms
+[backend] [api] POST /api/save-agent-output 200 +2ms
+[backend] [api] GET /api/foundry-models 304 +6ms
+[backend] [api] GET /api/llm-usage-daily 200 +6ms
+[backend] [api] GET /api/config 304 +1ms
+[backend] [api] GET /api/config 304 +0ms
+[backend] [api] GET /api/config 304 +0ms
+[backend] [api] GET /api/config 304 +1ms
+[backend] [api] GET /api/config 304 +10ms
+[backend] [api] GET /api/config 304 +1ms
+[backend] [jira-fetch] GET https://finmate.atlassian.net/rest/api/3/issue/TSP-3347
+[backend] [jira-fetch] OK TSP-3347 from https://finmate.atlassian.net
+[backend] [api] GET /api/jira-issue/https%3A%2F%2Ffinmate.atlassian.net%2Fbrowse%2FTSP-3347 200 +771ms
+[backend] [api] POST /api/context/knowledge 200 +54ms
+[backend] [api/generate] provider=aws tier=sonnet 
+[backend] [api/generate] bedrock resolved model: global.anthropic.claude-sonnet-4-6 (no body model) (tier: sonnet)
+[backend] [api] POST /api/generate 200 +17076ms
+[backend] [api] POST /api/context/knowledge 200 +22ms
+[backend] [api/generate] provider=aws tier=sonnet 
+[backend] [api/generate] bedrock resolved model: global.anthropic.claude-sonnet-4-6 (no body model) (tier: sonnet)
+[backend] [api] POST /api/generate 200 +132951ms
+[backend] [api] POST /api/save-agent-output 200 +3ms
+[backend] [api/notify/complete] sending completion notification {
+[backend]   agentName: 'BRD Agent',
+[backend]   identifier: 'https://finmate.atlassian.net/browse/TSP-3347',
+[backend]   subject: 'TSP-3347-BRD-UPI-Circle-Enforce-₹5000-Transaction-Limit-for-Full-Delegation-Transactions-(Pur-2026-05-07T06-17-30'
+[backend] }
+[backend] [api] GET /api/config 304 +0ms
+[backend] [api] GET /api/config 304 +1ms
+[backend] [api] POST /api/notify/complete 200 +4389ms
+[backend] [jira-fetch] GET https://finmate.atlassian.net/rest/api/3/issue/TSP-3855
+[backend] [jira-fetch] OK TSP-3855 from https://finmate.atlassian.net
+[backend] [api] GET /api/jira-issue/https%3A%2F%2Ffinmate.atlassian.net%2Fbrowse%2FTSP-3855 200 +490ms
+[backend] [api] POST /api/context/knowledge 200 +14ms
+[backend] [api/generate] provider=aws tier=sonnet 
+[backend] [api/generate] bedrock resolved model: global.anthropic.claude-sonnet-4-6 (no body model) (tier: sonnet)
+[backend] [api] POST /api/generate 200 +16614ms
+[backend] [api] POST /api/context/knowledge 200 +16ms
+[backend] [api/generate] provider=aws tier=sonnet 
+[backend] [api/generate] bedrock resolved model: global.anthropic.claude-sonnet-4-6 (no body model) (tier: sonnet)
+[backend] [api] POST /api/generate 200 +151837ms
+[backend] [api] POST /api/save-agent-output 200 +1ms
+[backend] [api] GET /api/config 304 +1ms
+[backend] [api] GET /api/config 304 +0ms
+[backend] [api] GET /api/config 304 +2ms
+[backend] [api] GET /api/config 304 +0ms

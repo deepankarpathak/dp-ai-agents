@@ -2,6 +2,7 @@
 
 # dependencies
 /node_modules
+/mcp/agents-launcher/node_modules
 /.pnp
 .pnp.js
 /build
@@ -22,6 +23,7 @@
 .env
 # Cursor IDE — never commit local MCP config, debug logs, or secrets
 .cursor/
+.claude/
 .env.local
 .env.development.local
 .env.test.local

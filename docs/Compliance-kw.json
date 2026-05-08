@@ -1,0 +1,452 @@
+[
+  {
+    "rule_id": "CS-4000-A",
+    "rule_title": "Daily Transaction Count Limit",
+    "category": "TRANSACTION_LIMIT",
+    "priority": 1,
+    "description": "Maximum 200 transactions allowed in 24 hours.",
+    "conditions": {},
+    "decision": {
+      "action": "BLOCK",
+      "reason_code": "TXN_COUNT_EXCEEDED"
+    },
+    "limits": {
+      "max_count": 200,
+      "window": "24h"
+    },
+    "applicability": {
+      "applies_to": ["PAYEE"]
+    },
+    "metadata": {
+      "npcI_rule": "OC132",
+      "status": "INVALID"
+    },
+    "search_tags": ["txn_limit", "count_limit", "daily_limit"]
+  },
+  {
+    "rule_id": "CS-4000-B",
+    "rule_title": "Daily Amount Limit",
+    "category": "TRANSACTION_LIMIT",
+    "priority": 1,
+    "description": "Maximum ₹5 lakh cumulative transactions allowed in 24 hours.",
+    "conditions": {},
+    "decision": {
+      "action": "BLOCK",
+      "reason_code": "TXN_AMOUNT_EXCEEDED"
+    },
+    "limits": {
+      "max_amount": 500000,
+      "window": "24h"
+    },
+    "applicability": {
+      "applies_to": ["PAYEE"]
+    },
+    "metadata": {
+      "npcI_rule": "OC132",
+      "status": "LIVE"
+    },
+    "search_tags": ["amount_limit", "5_lakh_limit"]
+  },
+
+  {
+    "rule_id": "CS-4001-A1",
+    "rule_title": "Online Gaming Android Collect Block",
+    "category": "MCC_RESTRICTION",
+    "priority": 1,
+    "description": "COLLECT not allowed for MCC 5816 on Android.",
+    "conditions": {
+      "payeeMccCode": ["5816"],
+      "payerOsType": ["ANDROID"],
+      "txnType": ["COLLECT"]
+    },
+    "decision": {
+      "action": "BLOCK",
+      "reason_code": "ANDROID_COLLECT_BLOCK"
+    },
+    "search_tags": ["gaming", "mcc_5816", "android"]
+  },
+
+  {
+    "rule_id": "CS-4001-A2",
+    "rule_title": "Online Gaming iOS Limit",
+    "category": "DEVICE_BASED_RULE",
+    "priority": 2,
+    "description": "iOS allows collect up to ₹2000 per day.",
+    "conditions": {
+      "payeeMccCode": ["5816"],
+      "payerOsType": ["IOS"],
+      "txnType": ["COLLECT"]
+    },
+    "decision": {
+      "action": "ALLOW"
+    },
+    "limits": {
+      "max_amount": 2000,
+      "type": "DAILY"
+    }
+  },
+
+  {
+    "rule_id": "CS-4001-A3",
+    "rule_title": "Gift Card Android Collect Block",
+    "category": "MCC_RESTRICTION",
+    "priority": 1,
+    "description": "MCC 6540 collect blocked for Android.",
+    "conditions": {
+      "payeeMccCode": ["6540"],
+      "payerOsType": ["ANDROID"],
+      "txnType": ["COLLECT"]
+    },
+    "decision": {
+      "action": "BLOCK"
+    }
+  },
+
+  {
+    "rule_id": "CS-4001-A4",
+    "rule_title": "Rent Payment Allowed Modes",
+    "category": "MCC_RESTRICTION",
+    "priority": 3,
+    "description": "Rent payments allowed for multiple initiation modes.",
+    "conditions": {
+      "payeeMccCode": ["6513"]
+    },
+    "decision": {
+      "action": "ALLOW"
+    }
+  },
+
+  {
+    "rule_id": "CS-4001-A5",
+    "rule_title": "Betting Android Collect Block",
+    "category": "MCC_RESTRICTION",
+    "priority": 1,
+    "description": "MCC 7995 collect blocked on Android.",
+    "conditions": {
+      "payeeMccCode": ["7995"],
+      "payerOsType": ["ANDROID"],
+      "txnType": ["COLLECT"]
+    },
+    "decision": {
+      "action": "BLOCK"
+    }
+  },
+
+  {
+    "rule_id": "CS-4001-A6",
+    "rule_title": "Betting iOS Limit",
+    "category": "DEVICE_BASED_RULE",
+    "priority": 2,
+    "description": "iOS collect allowed up to ₹2000 for MCC 7995.",
+    "conditions": {
+      "payeeMccCode": ["7995"],
+      "payerOsType": ["IOS"],
+      "txnType": ["COLLECT"]
+    },
+    "limits": {
+      "max_amount": 2000
+    },
+    "metadata": {
+      "status": "NOT_ENABLED"
+    }
+  },
+
+  {
+    "rule_id": "CS-4001-B",
+    "rule_title": "Digital Goods Collect Block",
+    "category": "MCC_RESTRICTION",
+    "priority": 1,
+    "conditions": {
+      "payeeMccCode": ["5412"],
+      "payerOsType": ["ANDROID"],
+      "txnType": ["COLLECT"]
+    },
+    "decision": {
+      "action": "BLOCK"
+    }
+  },
+
+  {
+    "rule_id": "CS-4001-C1",
+    "rule_title": "Credit Card Bill Collect Block",
+    "category": "MCC_RESTRICTION",
+    "priority": 1,
+    "conditions": {
+      "payeeMccCode": ["5413"],
+      "txnType": ["COLLECT"]
+    },
+    "decision": {
+      "action": "BLOCK"
+    }
+  },
+
+  {
+    "rule_id": "CS-4001-C2",
+    "rule_title": "Credit Card Verified Limit",
+    "category": "TRANSACTION_LIMIT",
+    "priority": 2,
+    "conditions": {
+      "payeeMccCode": ["5413"],
+      "isVerifiedMerchant": [true]
+    },
+    "limits": {
+      "max_amount": 200000
+    }
+  },
+
+  {
+    "rule_id": "CS-4002",
+    "rule_title": "High Value Verified Merchant Limit",
+    "category": "TRANSACTION_LIMIT",
+    "priority": 2,
+    "conditions": {
+      "isVerifiedMerchant": [true]
+    },
+    "limits": {
+      "max_amount": 500000
+    }
+  },
+
+  {
+    "rule_id": "CS-4003-A",
+    "rule_title": "P2PM Non Verified Collect Limit",
+    "category": "P2PM_CONTROL",
+    "priority": 1,
+    "conditions": {
+      "payeeMccCode": ["7407"],
+      "txnType": ["COLLECT"],
+      "isVerifiedMerchant": [false],
+      "amount": { "gt": 2000 }
+    },
+    "decision": {
+      "action": "BLOCK"
+    }
+  },
+
+  {
+    "rule_id": "CS-4003-B",
+    "rule_title": "P2PM Non Verified Intent Block",
+    "category": "P2PM_CONTROL",
+    "priority": 1,
+    "conditions": {
+      "isVerifiedMerchant": [false],
+      "amount": { "gt": 2000 }
+    },
+    "decision": {
+      "action": "BLOCK"
+    }
+  },
+
+  {
+    "rule_id": "CS-4003-C",
+    "rule_title": "Wallet Collect Block",
+    "category": "MCC_RESTRICTION",
+    "priority": 1,
+    "conditions": {
+      "payeeMccCode": ["6540"],
+      "txnType": ["COLLECT"]
+    },
+    "decision": {
+      "action": "BLOCK"
+    }
+  },
+
+  {
+    "rule_id": "CS-4005",
+    "rule_title": "Block MCC 6010",
+    "category": "MCC_RESTRICTION",
+    "priority": 1,
+    "conditions": {
+      "payeeMccCode": ["6010"]
+    },
+    "decision": {
+      "action": "BLOCK"
+    }
+  },
+
+  {
+    "rule_id": "CS-4006-A",
+    "rule_title": "P2P Intent Block",
+    "category": "INTENT_RESTRICTION",
+    "priority": 1,
+    "conditions": {
+      "txnType": ["P2P"],
+      "initiationMode": ["04", "05"]
+    },
+    "metadata": {
+      "status": "NOT_ENABLED"
+    }
+  },
+
+  {
+    "rule_id": "CS-4006-B",
+    "rule_title": "Offline Non Verified Intent Block",
+    "category": "INTENT_RESTRICTION",
+    "priority": 1,
+    "conditions": {
+      "isVerifiedMerchant": [false],
+      "merchantGenre": ["OFFLINE"],
+      "initiationMode": ["04"]
+    },
+    "decision": {
+      "action": "BLOCK"
+    }
+  },
+
+  {
+    "rule_id": "CS-4007",
+    "rule_title": "Inactive User Credit Block",
+    "category": "CREDIT_BLOCK",
+    "priority": 1,
+    "conditions": {
+      "lastActivity": { "gt_days": 365 }
+    },
+    "decision": {
+      "action": "BLOCK"
+    }
+  },
+
+  {
+    "rule_id": "CS-4008-A",
+    "rule_title": "Mandate Limit 5L Payee Initiated",
+    "category": "MANDATE_RULE",
+    "priority": 2,
+    "conditions": {
+      "businessType": ["MANDATE"],
+      "txnType": ["CREATE"],
+      "initiatedBy": ["PAYEE"],
+      "payeeMccCode": ["6211"],
+      "purposeCode": ["01"]
+    },
+    "limits": {
+      "max_amount": 500000
+    }
+  },
+
+  {
+    "rule_id": "CS-4008-B",
+    "rule_title": "Mandate Limit 5L Payee Initiated (Alt Purpose)",
+    "category": "MANDATE_RULE",
+    "priority": 2,
+    "conditions": {
+      "purposeCode": ["25"]
+    },
+    "limits": {
+      "max_amount": 500000
+    }
+  },
+
+  {
+    "rule_id": "CS-4008-C",
+    "rule_title": "Mandate Limit Payer Initiated",
+    "category": "MANDATE_RULE",
+    "priority": 2,
+    "conditions": {
+      "initiatedBy": ["PAYER"],
+      "initiationMode": ["04", "13"]
+    },
+    "limits": {
+      "max_amount": 500000
+    }
+  },
+
+  {
+    "rule_id": "CS-4008-D",
+    "rule_title": "Mandate Limit Payer Alt Purpose",
+    "category": "MANDATE_RULE",
+    "priority": 2,
+    "conditions": {
+      "initiatedBy": ["PAYER"],
+      "purposeCode": ["25"]
+    },
+    "limits": {
+      "max_amount": 500000
+    }
+  },
+
+  {
+    "rule_id": "CS-4009",
+    "rule_title": "Mandate Verified Merchant Limit",
+    "category": "MANDATE_RULE",
+    "priority": 2,
+    "conditions": {
+      "purposeCode": ["14"],
+      "isVerifiedMerchant": [true]
+    },
+    "limits": {
+      "max_amount": 500000
+    }
+  },
+
+  {
+    "rule_id": "CS-4010",
+    "rule_title": "Verified Merchant 2L Limit",
+    "category": "TRANSACTION_LIMIT",
+    "priority": 2,
+    "conditions": {
+      "isVerifiedMerchant": [true]
+    },
+    "limits": {
+      "max_amount": 200000
+    }
+  },
+
+  {
+    "rule_id": "CS-4012",
+    "rule_title": "Self Payment Block",
+    "category": "SELF_PAYMENT_BLOCK",
+    "priority": 1,
+    "conditions": {
+      "payerAccountType": ["RUPAY_CC"],
+      "payerName": "MATCH(payeeName)"
+    },
+    "decision": {
+      "action": "BLOCK"
+    }
+  },
+
+  {
+    "rule_id": "CS-4013",
+    "rule_title": "Purpose Code 60 Block",
+    "category": "PURPOSE_CODE_RULE",
+    "priority": 1,
+    "conditions": {
+      "purposeCode": ["60"]
+    },
+    "decision": {
+      "action": "BLOCK"
+    }
+  },
+
+  {
+    "rule_id": "CS-4014",
+    "rule_title": "Suspicious VPA Validation",
+    "category": "RISK_VALIDATION",
+    "priority": 1,
+    "conditions": {
+      "payerVpa": ["ANY"]
+    },
+    "decision": {
+      "action": "CHECK_PMS"
+    },
+    "metadata": {
+      "status": "IN_UAT"
+    }
+  },
+
+  {
+    "rule_id": "CS-4015",
+    "rule_title": "Credit Card MCC Block",
+    "category": "MCC_RESTRICTION",
+    "priority": 1,
+    "conditions": {
+      "payerAccountType": ["CREDIT_CARD"]
+    },
+    "decision": {
+      "action": "BLOCK"
+    },
+    "metadata": {
+      "status": "PENDING"
+    }
+  }
+]

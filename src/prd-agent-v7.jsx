@@ -1,10 +1,11 @@
 import { useState, useRef, useEffect } from "react";
 import { API_BASE, sendCompletionNotify } from "./config.js";
 import ShareAndScore from "./ShareAndScore.jsx";
-import { syncPublishDefaultJiraKey, loadPublishDefaults, syncPublishJiraSiteFromIssue, getLlmProviderForRequest, getLlmDisabledForRequest, getBedrockModelTierForRequest } from "./ConnectorsStatus.jsx";
+import { syncPublishDefaultJiraKey, loadPublishDefaults, syncPublishJiraSiteFromIssue, getLlmProviderForRequest, getLlmDisabledForRequest, getBedrockModelTierForRequest, getLlmRoutingExtras } from "./ConnectorsStatus.jsx";
 import { exportAgentOutput } from "./agentExport.js";
 import { buildShareSubjectLine } from "./shareSubject.js";
 import { buildAgentPrefaceContext } from "./agentContextPipeline.js";
+import JiraConnectorFetchSummary from "./JiraConnectorFetchSummary.jsx";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 const MODELS = [
@@ -368,6 +369,8 @@ export default function PRDAgent() {
   const [jiraIssueKey, setJiraIssueKey]         = useState("");
   const [jiraFetchLoading, setJiraFetchLoading] = useState(false);
   const [jiraFetchError, setJiraFetchError]     = useState("");
+  /** Last successful JIRA API payload (connector banner + sheet links). */
+  const [lastJiraPayloadPrd, setLastJiraPayloadPrd] = useState(null);
   const [autoPublishChannels, setAutoPublishChannels] = useState({ jira: false, telegram: false, email: false, slack: false });
   const [allowAutoPublish, setAllowAutoPublish] = useState(false);
 
@@ -441,11 +444,13 @@ export default function PRDAgent() {
       const r = await fetch(`${API_BASE}/api/jira-issue/${encodeURIComponent(idParam)}${siteQs}`, { headers: { Accept: "application/json" } });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d.error || `JIRA error ${r.status}`);
+      setLastJiraPayloadPrd(d);
       const parts = [d.summary ? `JIRA: ${d.id} — ${d.summary}` : `JIRA: ${d.id}`, d.description, d.acceptanceCriteria ? `Acceptance criteria:\n${d.acceptanceCriteria}` : ""].filter(Boolean);
       setInput(parts.join("\n\n"));
       syncPublishDefaultJiraKey(d.id || key);
       syncPublishJiraSiteFromIssue(d);
     } catch (e) {
+      setLastJiraPayloadPrd(null);
       setJiraFetchError(e.message || "JIRA fetch failed");
     }
     setJiraFetchLoading(false);
@@ -460,9 +465,11 @@ export default function PRDAgent() {
         max_tokens:8000,
         system:sys||BASE_SYSTEM,
         messages,
+        agent: "PRD",
         llmProvider: getLlmProviderForRequest(),
         llmDisabled: getLlmDisabledForRequest(),
         bedrockModelTier: getBedrockModelTierForRequest(),
+        ...getLlmRoutingExtras(),
         ...(prefaceContext ? { prefaceContext } : {}),
       }),
     });
@@ -864,6 +871,9 @@ export default function PRDAgent() {
     setSelectedPresets(new Set()); setManualFeedback(""); setShowFeedback(false); setFeedbackLog([]);
     setOtherFeedback("");
     setAllowAutoPublish(false);
+    setJiraIssueKey("");
+    setLastJiraPayloadPrd(null);
+    setJiraFetchError("");
   };
 
   const otherFeedbackDocxRef = useRef();
@@ -972,6 +982,11 @@ export default function PRDAgent() {
             </button>
           </div>
           {jiraFetchError && <div style={{ marginTop:8, fontSize:11, color:"#f87171" }}>{jiraFetchError}</div>}
+          {lastJiraPayloadPrd && (
+            <div style={{ marginTop:10, padding:12, background:"#070E1A", borderRadius:8, border:"1px solid #1E293B", fontSize:12, color:"#CBD5E1" }}>
+              <JiraConnectorFetchSummary data={lastJiraPayloadPrd} />
+            </div>
+          )}
           <div style={{ marginTop:8, fontSize:11, color:"#64748b" }}>Fetch summary & description into the requirement field. Configure JIRA in Connectors (top bar).</div>
         </div>
 

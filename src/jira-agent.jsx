@@ -9,6 +9,7 @@ import {
   getLlmProviderForRequest,
   getLlmDisabledForRequest,
   getBedrockModelTierForRequest,
+  getLlmRoutingExtras,
 } from "./ConnectorsStatus.jsx";
 import { exportAgentOutput } from "./agentExport.js";
 import { buildShareSubjectLine } from "./shareSubject.js";
@@ -23,6 +24,7 @@ import {
   projectKeyFromDomains,
   sanitizeDomainIds,
 } from "./agentDomainCatalog.js";
+import JiraConnectorFetchSummary from "./JiraConnectorFetchSummary.jsx";
 
 const MODELS = [
   { id: "claude-sonnet-4-20250514", label: "Sonnet 4.6", color: "#F59E0B" },
@@ -163,11 +165,12 @@ function repairJSON(text) {
   throw new Error("Could not parse JSON from model response");
 }
 
-async function apiJson(path, body, method = "POST") {
+async function apiJson(path, body, method = "POST", signal = undefined) {
   const res = await fetch(`${API_BASE}${path}`, {
     method,
     headers: { "Content-Type": "application/json", Accept: "application/json" },
     body: method === "GET" ? undefined : JSON.stringify(body ?? {}),
+    ...(signal ? { signal } : {}),
   });
   const text = await res.text();
   let data = {};
@@ -188,18 +191,22 @@ async function apiJson(path, body, method = "POST") {
   return data;
 }
 
-async function callLLM(systemPrompt, userMessage, maxTokens, modelId, prefaceContext = "") {
+async function callLLM(systemPrompt, userMessage, maxTokens, modelId, prefaceContext = "", signal = undefined, opts = {}) {
   const pc = typeof prefaceContext === "string" ? prefaceContext.trim() : "";
   const data = await apiJson("/api/generate", {
     system: systemPrompt,
     model: modelId,
     messages: [{ role: "user", content: userMessage }],
     max_tokens: maxTokens,
+    agent: "JIRA",
     llmProvider: getLlmProviderForRequest(),
     llmDisabled: getLlmDisabledForRequest(),
     bedrockModelTier: getBedrockModelTierForRequest(),
+    ...getLlmRoutingExtras(),
     ...(pc ? { prefaceContext: pc } : {}),
-  });
+    ...(opts.skipRag ? { skipRag: true } : {}),
+    ...(opts.skipPreface ? { skipPreface: true } : {}),
+  }, "POST", signal);
   const payload = data.data ?? data;
   const blocks = payload?.content;
   if (!Array.isArray(blocks)) throw new Error("Unexpected LLM response shape");
@@ -455,6 +462,7 @@ export default function JiraAgent() {
 
   const [jiraIssueKey, setJiraIssueKey] = useState("");
   const [jiraFetchLoading, setJiraFetchLoading] = useState(false);
+  const [lastJiraConnectorPayload, setLastJiraConnectorPayload] = useState(null);
   const [projectKey, setProjectKey] = useState(() =>
     (loadPublishDefaults().jiraDefaultProjectKey || "").toUpperCase().trim()
   );
@@ -497,6 +505,9 @@ export default function JiraAgent() {
   const historyAnchorRef = useRef(null);
   const hasSentNotifyRef = useRef(false);
   const [openSubtaskIndex, setOpenSubtaskIndex] = useState(null);
+
+  const [improving, setImproving] = useState(false);
+  const improveAbortRef = useRef(null);
 
   const selectedDomainIdsArr = useMemo(() => [...selectedDomains], [selectedDomains]);
   const jiraLabelsForCreate = useMemo(() => issueLabelsForJiraCreate(selectedDomainIdsArr), [selectedDomainIdsArr]);
@@ -660,6 +671,7 @@ export default function JiraAgent() {
       const r = await fetch(`${API_BASE}/api/jira-issue/${encodeURIComponent(idParam)}${siteQs}`, { headers: { Accept: "application/json" } });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d.error || `JIRA error ${r.status}`);
+      setLastJiraConnectorPayload(d);
       const block = [d.summary ? `${d.id} — ${d.summary}` : d.id, d.description, d.acceptanceCriteria ? `Acceptance criteria:\n${d.acceptanceCriteria}` : ""]
         .filter(Boolean)
         .join("\n\n");
@@ -670,6 +682,7 @@ export default function JiraAgent() {
       if (d.jiraSite === "secondary" || d.jiraSite === "primary") setJiraWriteSite(d.jiraSite);
       setStatusMsg(`Loaded ${d.id}`);
     } catch (e) {
+      setLastJiraConnectorPayload(null);
       setStatusMsg("Error: " + e.message);
     } finally {
       setJiraFetchLoading(false);
@@ -831,22 +844,38 @@ export default function JiraAgent() {
 
   const handleImprove = async () => {
     if (!feedback.trim() || !resultMd.trim()) return;
+    const controller = new AbortController();
+    improveAbortRef.current = controller;
+    setImproving(true);
     setLoading(true);
     setStatusMsg("Improving ticket…");
     try {
       const prompt = `CURRENT TICKET:\n${resultMd}\n\nUSER FEEDBACK:\n${feedback}`;
-      const truncated = truncateForLLM(prompt, MAX_GENERATE_CHARS);
-      const pf = await loadPreface(truncated.slice(0, 3000));
-      const improved = await callLLM(FEEDBACK_SYSTEM, truncated, 8000, model.id, pf);
+      const truncated = truncateForLLM(prompt, 80_000);
+      const improved = await callLLM(FEEDBACK_SYSTEM, truncated, 6000, model.id, "", controller.signal, { skipRag: true, skipPreface: true });
       setResultMd(improved);
       setFeedback("");
       setFeedbackIncorporated(true);
       setStatusMsg("Feedback incorporated.");
     } catch (e) {
-      setStatusMsg("Error: " + e.message);
+      if (e.name === "AbortError" || /aborted|cancelled/i.test(e.message || "")) {
+        setStatusMsg("Cancelled.");
+      } else {
+        setStatusMsg("Error: " + e.message);
+      }
     } finally {
       setLoading(false);
+      setImproving(false);
+      improveAbortRef.current = null;
     }
+  };
+
+  const handleCancelImprove = () => {
+    improveAbortRef.current?.abort();
+    improveAbortRef.current = null;
+    setImproving(false);
+    setLoading(false);
+    setStatusMsg("Cancelled.");
   };
 
   const handleCreateJira = async () => {
@@ -1186,14 +1215,25 @@ export default function JiraAgent() {
           placeholder="Feedback for the next revision"
           style={{ width: "100%", background: "#0B1220", border: "1px solid #1E293B", borderRadius: 8, color: "#E2E8F0", padding: "10px 12px", fontSize: 12 }}
         />
-        <button
-          type="button"
-          onClick={handleImprove}
-          disabled={loading || !feedback.trim()}
-          style={{ marginTop: 10, background: "linear-gradient(135deg,#A78BFA,#6366F1)", border: "none", borderRadius: 8, padding: "8px 16px", color: "#fff", fontSize: 12, fontWeight: 600, cursor: "pointer" }}
-        >
-          {loading ? "Improving…" : "Apply feedback"}
-        </button>
+        <div style={{ display: "flex", gap: 8, marginTop: 10, alignItems: "center" }}>
+          <button
+            type="button"
+            onClick={handleImprove}
+            disabled={loading || !feedback.trim()}
+            style={{ background: "linear-gradient(135deg,#A78BFA,#6366F1)", border: "none", borderRadius: 8, padding: "8px 16px", color: "#fff", fontSize: 12, fontWeight: 600, cursor: improving || (loading && !improving) ? "not-allowed" : "pointer", opacity: (loading || !feedback.trim()) ? 0.6 : 1 }}
+          >
+            {improving ? "Improving…" : "Apply feedback"}
+          </button>
+          {improving && (
+            <button
+              type="button"
+              onClick={handleCancelImprove}
+              style={{ background: "#1E293B", border: "1px solid #374151", borderRadius: 8, padding: "8px 16px", color: "#F87171", fontSize: 12, fontWeight: 600, cursor: "pointer" }}
+            >
+              Cancel
+            </button>
+          )}
+        </div>
       </div>
 
       <ShareAndScore docType="jira" title={displayTitle} content={resultMd} jiraKey={derivedJiraKey} jiraShareSite={jiraWriteSite} autoPublish={[]} />
@@ -1396,6 +1436,11 @@ export default function JiraAgent() {
               {jiraFetchLoading ? "Fetching…" : "Fetch into context"}
             </button>
           </div>
+          {lastJiraConnectorPayload && (
+            <div style={{ marginTop: 12, padding: 12, background: "#0B1220", borderRadius: 8, border: "1px solid #1E293B", fontSize: 12, color: "#E2E8F0" }}>
+              <JiraConnectorFetchSummary data={lastJiraConnectorPayload} />
+            </div>
+          )}
         </div>
 
         <div style={{ background: "#0D1626", border: "1px solid #1E293B", borderRadius: 14, padding: 24, marginBottom: 20 }}>

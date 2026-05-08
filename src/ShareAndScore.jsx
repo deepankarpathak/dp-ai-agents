@@ -1,7 +1,21 @@
-import { useState, useEffect, useRef, useMemo } from "react";
+import { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import { API_BASE } from "./config.js";
 import { loadPublishDefaults, savePublishDefaults } from "./ConnectorsStatus.jsx";
 import { buildShareSubjectLine } from "./shareSubject.js";
+
+function hashContentSnippet(s) {
+  const str = String(s || "").slice(0, 4000);
+  let h = 5381;
+  for (let i = 0; i < str.length; i++) h = ((h << 5) + h) ^ str.charCodeAt(i);
+  return (h >>> 0).toString(36);
+}
+
+/** Stable localStorage key so scores survive reload; prefers JIRA key when set. */
+function buildScorePersistenceKey(docType, jiraKey, title, content) {
+  const k = String(jiraKey || "").trim().toUpperCase();
+  if (k) return `agent-score-v2:${docType}:${k}`;
+  return `agent-score-v2:${docType}:h:${hashContentSnippet(content)}:${String(title || "").slice(0, 48)}`;
+}
 
 const panelStyle = {
   background: "#0D1626",
@@ -58,6 +72,11 @@ export default function ShareAndScore({ docType, title, content, jiraKey = "", a
     [docType, jiraKey, title]
   );
 
+  const scorePersistenceKey = useMemo(
+    () => buildScorePersistenceKey(docType, jiraKey, title, content),
+    [docType, jiraKey, title, content]
+  );
+
   const ranAutoPublish = useRef(false);
   const contentHeadRef = useRef("");
 
@@ -68,6 +87,39 @@ export default function ShareAndScore({ docType, title, content, jiraKey = "", a
       ranAutoPublish.current = false;
     }
   }, [content]);
+
+  useEffect(() => {
+    if (!content) return;
+    try {
+      const raw = localStorage.getItem(scorePersistenceKey);
+      if (!raw) return;
+      const saved = JSON.parse(raw);
+      if (saved && typeof saved.score === "number" && saved.rationale) {
+        setScore({
+          score: saved.score,
+          maxScore: saved.maxScore ?? 10,
+          rationale: saved.rationale,
+          scoreProvider: saved.scoreProvider,
+          savedAt: saved.savedAt,
+          fromStorage: true,
+        });
+      }
+    } catch {
+      /* ignore */
+    }
+  }, [content, scorePersistenceKey]);
+
+  const persistScoreToStorage = useCallback(
+    (payload) => {
+      try {
+        const { fromStorage: _fs, ...rest } = payload;
+        localStorage.setItem(scorePersistenceKey, JSON.stringify(rest));
+      } catch {
+        /* quota */
+      }
+    },
+    [scorePersistenceKey]
+  );
 
   useEffect(() => {
     const onDefaults = () => {
@@ -224,8 +276,19 @@ export default function ShareAndScore({ docType, title, content, jiraKey = "", a
         title,
         scoreProvider,
       });
-      if (d.success) setScore({ score: d.score, maxScore: d.maxScore ?? 10, rationale: d.rationale });
-      else setScoreError(d.error || "Score failed");
+      if (d.success) {
+        const raw = Number(d.score);
+        const scoreNum = Number.isFinite(raw) ? Math.round(Math.min(10, Math.max(0, raw)) * 100) / 100 : 0;
+        const next = {
+          score: scoreNum,
+          maxScore: d.maxScore ?? 10,
+          rationale: d.rationale || "",
+          scoreProvider: d.scoreProvider || scoreProvider,
+          fromStorage: false,
+        };
+        setScore(next);
+        persistScoreToStorage({ ...next, savedAt: new Date().toISOString() });
+      } else setScoreError(d.error || "Score failed");
     } catch (e) { setScoreError(e.message); }
     setScoreLoading(false);
   };
@@ -306,6 +369,11 @@ export default function ShareAndScore({ docType, title, content, jiraKey = "", a
 
       {/* Score */}
       <div style={{ marginBottom: 8 }}>
+        {score?.fromStorage && score?.savedAt && (
+          <div style={{ fontSize: 10, color: "#64748b", marginBottom: 6 }}>
+            Restored saved score ({new Date(score.savedAt).toLocaleString()})
+          </div>
+        )}
         <div style={{ fontSize: 11, color: "#64748b", marginBottom: 6 }}>Score with:</div>
         <select
           value={scoreProvider}
@@ -340,13 +408,24 @@ export default function ShareAndScore({ docType, title, content, jiraKey = "", a
         </button>
         {score && (
           <span style={{ fontSize: 13, color: "#F59E0B", fontWeight: 700 }}>
-            Score: {score.score}/{score.maxScore}
+            Score: {Number(score.score).toFixed(2)}/{score.maxScore}
           </span>
         )}
         {scoreError && <span style={{ fontSize: 11, color: "#f87171" }}>{scoreError}</span>}
       </div>
       {score?.rationale && (
-        <div style={{ marginTop: 8, fontSize: 12, color: "#94A3B8", lineHeight: 1.5 }}>{score.rationale}</div>
+        <div
+          style={{
+            marginTop: 8,
+            fontSize: 12,
+            color: "#94A3B8",
+            lineHeight: 1.55,
+            whiteSpace: "pre-wrap",
+            fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+          }}
+        >
+          {score.rationale}
+        </div>
       )}
     </div>
   );

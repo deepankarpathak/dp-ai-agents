@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "prd-agent-launcher": {
+      "command": "node",
+      "args": ["./mcp/agents-launcher/index.js"]
+    }
+  }
+}

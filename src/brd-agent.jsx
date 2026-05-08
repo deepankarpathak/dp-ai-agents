@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import { API_BASE, sendCompletionNotify } from "./config.js";
 import ShareAndScore from "./ShareAndScore.jsx";
-import { syncPublishDefaultJiraKey, loadPublishDefaults, syncPublishJiraSiteFromIssue, getLlmProviderForRequest, getLlmDisabledForRequest, getBedrockModelTierForRequest } from "./ConnectorsStatus.jsx";
+import { syncPublishDefaultJiraKey, loadPublishDefaults, syncPublishJiraSiteFromIssue, getLlmProviderForRequest, getLlmDisabledForRequest, getBedrockModelTierForRequest, getLlmRoutingExtras } from "./ConnectorsStatus.jsx";
 import { exportAgentOutput } from "./agentExport.js";
 import { buildShareSubjectLine } from "./shareSubject.js";
 import { buildAgentPrefaceContext } from "./agentContextPipeline.js";
@@ -12,6 +12,7 @@ import {
   domainLabelsForDisplay,
   sanitizeDomainIds,
 } from "./agentDomainCatalog.js";
+import JiraConnectorFetchSummary from "./JiraConnectorFetchSummary.jsx";
 
 const BRD_SYSTEM = `You are a senior BRD specialist for UPI/payment switch systems at a major Indian fintech. Generate a comprehensive, production-grade BRD in the following exact 24-section format. Use markdown with ## for section headers. Use markdown tables (| col | col |) for structured data. Be exhaustive — engineering teams must be able to implement from this BRD without further clarification.
 
@@ -101,7 +102,7 @@ function loadFeedbackMemory() { try { return JSON.parse(localStorage.getItem(FEE
 function saveFeedbackMemory(m) { try { localStorage.setItem(FEEDBACK_MEM_KEY, JSON.stringify(m.slice(0, 20))); } catch {} }
 
 // ── LLM call (same API as PRD/UAT) ──────────────────────────────────────────
-async function callLLM(systemPrompt, userMessage, maxTokens = 8000, prefaceContext = "") {
+async function callLLM(systemPrompt, userMessage, maxTokens = 8000, prefaceContext = "", opts = {}) {
   const pc = typeof prefaceContext === "string" ? prefaceContext.trim() : "";
   const res = await fetch(`${API_BASE}/api/generate`, {
     method: "POST",
@@ -110,10 +111,14 @@ async function callLLM(systemPrompt, userMessage, maxTokens = 8000, prefaceConte
       system: systemPrompt,
       messages: [{ role: "user", content: userMessage }],
       max_tokens: maxTokens,
+      agent: "BRD",
       llmProvider: getLlmProviderForRequest(),
       llmDisabled: getLlmDisabledForRequest(),
       bedrockModelTier: getBedrockModelTierForRequest(),
+      ...getLlmRoutingExtras(),
       ...(pc ? { prefaceContext: pc } : {}),
+      ...(opts.skipRag ? { skipRag: true } : {}),
+      ...(opts.skipPreface ? { skipPreface: true } : {}),
     }),
   });
   const text = await res.text();
@@ -426,9 +431,8 @@ export default function BRDAgent() {
     if (!feedbackText.trim()) { setError("Enter feedback or upload a document."); return; }
     setLoading(true); setStatusMsg("Improving BRD with feedback…");
     try {
-      const improvePrompt = `You have an existing BRD. Apply the following feedback to improve it.\n\nFEEDBACK:\n${feedbackText}\n\nEXISTING BRD:\n${brdRaw.slice(0, 24000)}\n\nGenerate the FULL improved 24-section BRD. Apply all feedback. Return the complete BRD in markdown. Do NOT truncate or shorten any section.`;
-      const pf = await loadPreface(improvePrompt.slice(0, 3000));
-      const improved = await callLLM(BRD_SYSTEM, improvePrompt, 16000, pf);
+      const improvePrompt = `You have an existing BRD. Apply the following feedback to improve it.\n\nFEEDBACK:\n${feedbackText}\n\nEXISTING BRD:\n${brdRaw.slice(0, 20000)}\n\nGenerate the FULL improved 24-section BRD. Apply all feedback. Return the complete BRD in markdown. Do NOT truncate or shorten any section.`;
+      const improved = await callLLM(BRD_SYSTEM, improvePrompt, 8000, "", { skipRag: true, skipPreface: true });
       setBrdRaw(improved);
       const newMem = [...feedbackMemory, feedbackText.trim().slice(0, 200)].slice(-20);
       setFeedbackMemory(newMem);
@@ -537,8 +541,8 @@ export default function BRDAgent() {
               </div>
               {jiraData && (
                 <div style={{ marginTop: 10, padding: 12, background: C.bg3, borderRadius: 10, fontSize: 12, color: C.text2 }}>
-                  <div style={{ color: C.green, fontWeight: 600, marginBottom: 6 }}>✓ JIRA fetched & auto-populated</div>
-                  <div>ID: {jiraData.id} · Status: {jiraData.status} · Reporter: {jiraData.reporter}</div>
+                  <JiraConnectorFetchSummary data={jiraData} lineStyle={{ color: C.green }} linkStyle={{ color: "#4fa3e3" }} />
+                  <div style={{ fontSize: 11, color: C.text3, marginTop: 8 }}>ID: {jiraData.id} · Reporter: {jiraData.reporter}</div>
                 </div>
               )}
               <div style={{ marginTop: 8, fontSize: 11, color: C.text3 }}>Use Fetch to pull summary, description & acceptance criteria from JIRA into this form (input). Other connectors (Slack, Telegram, etc.) show status in the top bar; configure in .env and use for future integrations.</div>

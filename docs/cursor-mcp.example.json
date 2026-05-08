@@ -33,6 +33,10 @@
         "-lc",
         "exec /Users/YOUR_USER/prd-agent/scripts/run-superset-mcp.sh"
       ]
+    },
+    "prd-agent-launcher": {
+      "command": "node",
+      "args": ["/Users/YOUR_USER/prd-agent/mcp/agents-launcher/index.js"]
     }
   }
 }

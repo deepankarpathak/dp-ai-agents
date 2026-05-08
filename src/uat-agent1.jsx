@@ -1,11 +1,12 @@
 import { useState, useRef, useEffect } from "react";
 import { API_BASE, sendCompletionNotify } from "./config.js";
 import ShareAndScore from "./ShareAndScore.jsx";
-import { syncPublishDefaultJiraKey, loadPublishDefaults, syncPublishJiraSiteFromIssue, getLlmProviderForRequest, getLlmDisabledForRequest, getBedrockModelTierForRequest } from "./ConnectorsStatus.jsx";
+import { syncPublishDefaultJiraKey, loadPublishDefaults, syncPublishJiraSiteFromIssue, getLlmProviderForRequest, getLlmDisabledForRequest, getBedrockModelTierForRequest, getLlmRoutingExtras } from "./ConnectorsStatus.jsx";
 import { exportAgentOutput } from "./agentExport.js";
 import { buildShareSubjectLine } from "./shareSubject.js";
 import AgentDomainMultiSelect from "./AgentDomainMultiSelect.jsx";
 import { AGENT_DOMAIN_ENTRIES, domainIdsFromLabels, sanitizeDomainIds } from "./agentDomainCatalog.js";
+import JiraConnectorFetchSummary from "./JiraConnectorFetchSummary.jsx";
 
 // ── Google Font ───────────────────────────────────────────────────────────────
 const fontLink = document.createElement("link");
@@ -106,12 +107,7 @@ State ONLY: ✅ PASS, ⚠️ PASS WITH CONDITIONS, or ❌ FAIL
 Then 2-3 sentence justification.
 DO NOT include Sign-off Pending, Prepared By, Date, or Next Review fields.
 
-Rules:
-- Never hallucinate numbers — extract from provided data only
-- Use "Insufficient data — please supply [X]" if info is missing
-- All tables use markdown format
-- Be precise and professional
-- Start response with "# UAT Status"`;
+Rules: never invent counts; use "Insufficient data — please supply [X]" if missing; markdown tables only; professional tone; start with "# UAT Status". Keep wording compact to save tokens without omitting any required section.`;
 };
 
 const CLARIFY_SYSTEM = `You are TestSentinel, a UAT expert for fintech and UPI payment systems.
@@ -470,6 +466,8 @@ export default function TestSentinel() {
   const [jiraIssueKey, setJiraIssueKey] = useState("");
   const [jiraFetchLoading, setJiraFetchLoading] = useState(false);
   const [jiraFetchError, setJiraFetchError] = useState("");
+  /** Last successful GET /api/jira-issue payload (connector banner + links). */
+  const [lastJiraPayload, setLastJiraPayload] = useState(null);
 
   useEffect(() => { saveUATFeedbackMemoryLS(feedbackMemory); }, [feedbackMemory]);
 
@@ -515,6 +513,7 @@ export default function TestSentinel() {
       const r = await fetch(`${API_BASE}/api/jira-issue/${encodeURIComponent(idParam)}${siteQs}`, { headers: { Accept: "application/json" } });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d.error || `JIRA error ${r.status}`);
+      setLastJiraPayload(d);
       setJiraSubject(d.summary ? `${d.id} — ${d.summary}` : d.id || jiraIssueKey);
       setJiraDesc([d.description, d.acceptanceCriteria ? `Acceptance criteria:\n${d.acceptanceCriteria}` : ""].filter(Boolean).join("\n\n") || "(No description)");
       setJiraMode("type");
@@ -563,9 +562,11 @@ export default function TestSentinel() {
         system: systemPrompt,
         messages: [{ role: "user", content: userMessage }],
         max_tokens: maxTokens,
+        agent: "UAT",
         llmProvider: getLlmProviderForRequest(),
         llmDisabled: getLlmDisabledForRequest(),
         bedrockModelTier: getBedrockModelTierForRequest(),
+        ...getLlmRoutingExtras(),
       }),
     });
     const text = await res.text();
@@ -585,7 +586,7 @@ export default function TestSentinel() {
     setLoading(true); setStatusMsg("Analyzing inputs & drafting objective...");
     try {
       const ctx = truncateForLLM(buildContext(), MAX_CLARIFY_USER_CHARS);
-      const raw = await callClaude(CLARIFY_SYSTEM, ctx);
+      const raw = await callClaude(CLARIFY_SYSTEM, ctx, 3500);
       setClarifyRaw(raw);
       // parse draft objective
       const objMatch = raw.match(/DRAFT_OBJECTIVE:\s*([\s\S]*?)(?=QUESTIONS:|$)/i);
@@ -611,7 +612,7 @@ export default function TestSentinel() {
       if (feedbackMemory.length > 0) userMsg += `\nREMEMBERED FEEDBACK FROM PREVIOUS UATs (apply these improvements):\n${feedbackMemory.map(f => `- ${f}`).join("\n")}\n`;
       userMsg = truncateForLLM(userMsg, MAX_GENERATE_USER_CHARS);
       const domains = AGENT_DOMAIN_ENTRIES.filter((d) => selectedDomains.includes(d.id));
-      const signoff = await callClaude(buildSystemPrompt(domains, editedObjective, ""), userMsg);
+      const signoff = await callClaude(buildSystemPrompt(domains, editedObjective, ""), userMsg, 16384);
       const jiraKey = parseJiraIssueKey(jiraIssueKey) || parseJiraIssueKey(jiraSubject);
       const entry = saveToHistory({
         jira: jiraSubject||jiraFiles[0]?.name||"Unnamed",
@@ -661,7 +662,7 @@ export default function TestSentinel() {
       else feedbackFC.forEach(f=>{ fbCtx+=`[File: ${f.name}]\n${f.content}\n`; });
       fbCtx = truncateForLLM(fbCtx, MAX_FEEDBACK_USER_CHARS);
       const domains = AGENT_DOMAIN_ENTRIES.filter((d) => result.domains?.includes(d.label));
-      const improved = await callClaude(buildSystemPrompt(domains, editedObjective, feedbackText||"(see attached feedback)"), fbCtx);
+      const improved = await callClaude(buildSystemPrompt(domains, editedObjective, feedbackText||"(see attached feedback)"), fbCtx, 16384);
       const jiraKey = parseJiraIssueKey(jiraIssueKey) || parseJiraIssueKey(jiraSubject);
       const entry = saveToHistory({
         jira: (jiraSubject||"Feedback revision")+" (revised)",
@@ -707,7 +708,7 @@ export default function TestSentinel() {
     setSelectedDomains(["switch"]); setClarifyRaw(""); setDraftObjective(""); setEditedObjective("");
     setClarifyAnswers(""); setResult(null); setStatusMsg(""); setFeedbackText(""); setFeedbackFiles([]); setFeedbackFC([]);
     setJiraMode("type"); setTestMode("type"); setDocsMode("type"); setFeedbackMode("type");
-    setJiraIssueKey(""); setJiraFetchError("");
+    setJiraIssueKey(""); setJiraFetchError(""); setLastJiraPayload(null);
     setAllowAutoPublish(false);
   };
 
@@ -827,7 +828,11 @@ export default function TestSentinel() {
               {jiraFetchError && <div style={{ marginTop:8, fontSize:11, color:"#f87171" }}>{jiraFetchError}</div>}
               {(jiraSubject || jiraDesc) && (
                 <div style={{ marginTop:10, padding:12, background:C.surface, borderRadius:8, fontSize:12, color:C.text }}>
-                  <span style={{ color:"#22c55e", fontWeight:600 }}>✓ JIRA fetched — subject & description filled below</span>
+                  {lastJiraPayload ? (
+                    <JiraConnectorFetchSummary data={lastJiraPayload} />
+                  ) : (
+                    <span style={{ color:"#22c55e", fontWeight:600 }}>JIRA details entered below (manual paste).</span>
+                  )}
                 </div>
               )}
               <div style={{ marginTop:8, fontSize:11, color:C.muted }}>Fetch summary & description into JIRA Details. Configure JIRA in Connectors (top bar).</div>

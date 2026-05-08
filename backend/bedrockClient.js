@@ -374,7 +374,7 @@ function extractAggregatedStreamingAssistantText(raw) {
  * Legacy: BEDROCK_INSECURE_TLS=true forces skip verification even if REJECT_UNAUTHORIZED is set.
  */
 function bedrockGatewayFetchInit(invokeUrl) {
-  const timeoutMs = Math.min(Math.max(Number(process.env.BEDROCK_HTTP_TIMEOUT_MS) || 120000, 5000), 600000);
+  const timeoutMs = Math.min(Math.max(Number(process.env.BEDROCK_HTTP_TIMEOUT_MS) || 300000, 5000), 600000);
   let agent;
   try {
     const u = new URL(invokeUrl);
@@ -463,6 +463,7 @@ async function invokeBedrockHttpGateway({ messages, system, maxTokens, modelId }
   });
   return {
     content: [{ type: "text", text }],
+    usage: parsed && typeof parsed === "object" ? parsed.usage || null : null,
   };
 }
 
@@ -538,6 +539,7 @@ export async function converseBedrock({ messages, system, maxTokens, modelId: mo
   const text = extractConverseText(out);
   return {
     content: [{ type: "text", text }],
+    usage: out?.usage || null,
   };
 }
 

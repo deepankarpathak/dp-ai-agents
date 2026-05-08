@@ -1,6 +1,6 @@
 import { useState, useRef, useCallback } from "react";
 import { API_BASE } from "./config.js";
-import { getLlmProviderForRequest, getLlmDisabledForRequest, getBedrockModelTierForRequest } from "./ConnectorsStatus.jsx";
+import { getLlmProviderForRequest, getLlmDisabledForRequest, getBedrockModelTierForRequest, getLlmRoutingExtras } from "./ConnectorsStatus.jsx";
 import { buildAgentPrefaceContext } from "./agentContextPipeline.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -414,10 +414,12 @@ export default function UATAgent() {
         model,
         messages: [{ role: "user", content: userMessage }],
         max_tokens: maxTokens,
+        agent: "UAT",
         ...(pf ? { prefaceContext: pf } : {}),
         llmProvider: getLlmProviderForRequest(),
         llmDisabled: getLlmDisabledForRequest(),
         bedrockModelTier: getBedrockModelTierForRequest(),
+        ...getLlmRoutingExtras(),
       }),
     });
     const text = await res.text();

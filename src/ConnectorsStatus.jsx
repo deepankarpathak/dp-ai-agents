@@ -20,19 +20,32 @@ const PUBLISH_DEFAULTS_EMPTY = {
   /** openai | foundry — which backend Share & Score uses for Get score */
   scoreProvider: "openai",
   /**
-   * auto | aws | foundry | off — routing for agent generation calls.
-   * auto = Bedrock primary, Foundry fallback.
+   * auto | aws | openai | foundry | off — routing for agent generation calls.
+   * auto = Bedrock → Foundry → OpenAI fallback.
    */
   llmProvider: "auto",
   /** Allow disabling individual providers even when mode is auto. */
-  llmDisabled: { aws: false, foundry: false },
+  llmDisabled: { aws: false, foundry: false, openai: false },
+  /** Optional override for OpenAI chat model when routing uses OpenAI (empty = server default). */
+  openaiModel: "",
+  /**
+   * Per–Foundry-model enable (key = id from /api/foundry-models). Omitted / empty = all enabled.
+   * @type {Record<string, boolean> | undefined}
+   */
+  foundryModelsEnabled: undefined,
   /** sonnet | opus | haiku — Bedrock model family when LLM provider is AWS (maps to inference profile IDs on the server). */
   bedrockModelTier: "sonnet",
 };
 function loadPublishDefaults() {
   try {
     const raw = localStorage.getItem(PUBLISH_DEFAULTS_KEY);
-    return raw ? { ...PUBLISH_DEFAULTS_EMPTY, ...JSON.parse(raw) } : { ...PUBLISH_DEFAULTS_EMPTY };
+    if (!raw) return { ...PUBLISH_DEFAULTS_EMPTY };
+    const parsed = JSON.parse(raw);
+    return {
+      ...PUBLISH_DEFAULTS_EMPTY,
+      ...parsed,
+      llmDisabled: { ...PUBLISH_DEFAULTS_EMPTY.llmDisabled, ...(parsed.llmDisabled || {}) },
+    };
   } catch {
     return { ...PUBLISH_DEFAULTS_EMPTY };
   }
@@ -68,6 +81,7 @@ export function getLlmProviderForRequest() {
   const d = loadPublishDefaults();
   const v = String(d.llmProvider || "auto").toLowerCase();
   if (v === "foundry") return "foundry";
+  if (v === "openai") return "openai";
   if (v === "aws") return "aws";
   if (v === "off") return "off";
   return "auto";
@@ -79,7 +93,21 @@ export function getLlmDisabledForRequest() {
   return {
     aws: Boolean(x?.aws),
     foundry: Boolean(x?.foundry),
+    openai: Boolean(x?.openai),
   };
+}
+
+/** Extra fields for POST /api/generate (Foundry model toggles, OpenAI model override). */
+export function getLlmRoutingExtras() {
+  const d = loadPublishDefaults();
+  const out = {};
+  if (d.foundryModelsEnabled && typeof d.foundryModelsEnabled === "object") {
+    out.foundryModelsEnabled = d.foundryModelsEnabled;
+  }
+  if (d.openaiModel && String(d.openaiModel).trim()) {
+    out.openaiModel = String(d.openaiModel).trim();
+  }
+  return out;
 }
 
 /** Bedrock model tier for /api/generate when LLM provider is AWS. */
@@ -109,18 +137,37 @@ export default function ConnectorsStatus() {
     telegram: false,
     llmBedrockConfigured: false,
     llmFoundryConfigured: false,
+    llmOpenAiConfigured: false,
     llmProviders: [],
   });
   const [open, setOpen] = useState(false);
   const [jiraTestResult, setJiraTestResult] = useState("");
   const [jiraTestLoading, setJiraTestLoading] = useState(false);
   const [publishDefaults, setPublishDefaults] = useState(() => loadPublishDefaults());
-  useEffect(() => { if (open) setPublishDefaults(loadPublishDefaults()); }, [open]);
+  useEffect(() => {
+    if (open) {
+      setPublishDefaults(loadPublishDefaults());
+      fetch(`${API_BASE}/api/llm-usage-daily?days=8`)
+        .then((r) => r.json())
+        .then((d) => {
+          if (d.success) setLlmUsageDaily(d);
+        })
+        .catch(() => setLlmUsageDaily(null));
+      fetch(`${API_BASE}/api/foundry-models`)
+        .then((r) => r.json())
+        .then((d) => {
+          if (d.success && Array.isArray(d.models)) setFoundryModelRows(d.models);
+        })
+        .catch(() => setFoundryModelRows([]));
+    }
+  }, [open]);
   const [publishSaved, setPublishSaved] = useState(false);
   const [llmProbeLoading, setLlmProbeLoading] = useState(false);
   const [backendUnreachable, setBackendUnreachable] = useState(false);
   const [backupMsg, setBackupMsg] = useState("");
   const importFileRef = useRef(null);
+  const [llmUsageDaily, setLlmUsageDaily] = useState(null);
+  const [foundryModelRows, setFoundryModelRows] = useState([]);
 
   const fetchStatus = useCallback(() => {
     fetch(`${API_BASE}/api/connectors/status`)
@@ -388,9 +435,51 @@ export default function ConnectorsStatus() {
             </div>
 
             <div style={{ marginBottom: 16, padding: 14, background: "#1e293b", borderRadius: 12, border: "1px solid #334155" }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: "#e2e8f0", marginBottom: 8 }}>LLM usage by agent (UTC day)</div>
+              <p style={{ fontSize: 10, color: "#64748b", margin: "0 0 8px", lineHeight: 1.45 }}>
+                Calls and token counts per agent label (PRD, BRD, JIRA, UAT, ANALYST) are recorded on the server in <code style={{ color: "#94a3b8" }}>backend/data/llm-usage-daily.json</code>. OpenAI and Foundry return usage when the API includes it; Bedrock returns tokens from Converse when available.
+              </p>
+              {llmUsageDaily && llmUsageDaily.days ? (
+                <div style={{ maxHeight: 220, overflow: "auto", fontSize: 10, color: "#cbd5e1", lineHeight: 1.5 }}>
+                  {Object.keys(llmUsageDaily.days)
+                    .sort()
+                    .reverse()
+                    .map((day) => {
+                      const byAgent = llmUsageDaily.days[day] || {};
+                      const parts = Object.keys(byAgent);
+                      if (!parts.length) {
+                        return (
+                          <div key={day} style={{ marginBottom: 6, opacity: 0.6 }}>
+                            {day}: (no data)
+                          </div>
+                        );
+                      }
+                      return (
+                        <div key={day} style={{ marginBottom: 10 }}>
+                          <div style={{ fontWeight: 700, color: "#fbbf24", marginBottom: 2 }}>{day}</div>
+                          {parts.map((ag) => (
+                            <div key={ag} style={{ marginLeft: 8, marginBottom: 4 }}>
+                              <span style={{ color: "#93c5fd" }}>{ag}</span>
+                              {Object.entries(byAgent[ag] || {}).map(([prov, rec]) => (
+                                <span key={prov} style={{ marginLeft: 8 }}>
+                                  {prov}: {rec.calls} calls, {rec.promptTokens} prompt + {rec.completionTokens} completion tok
+                                </span>
+                              ))}
+                            </div>
+                          ))}
+                        </div>
+                      );
+                    })}
+                </div>
+              ) : (
+                <div style={{ fontSize: 10, color: "#64748b" }}>Open Connectors to load usage, or start the backend.</div>
+              )}
+            </div>
+
+            <div style={{ marginBottom: 16, padding: 14, background: "#1e293b", borderRadius: 12, border: "1px solid #334155" }}>
               <div style={{ fontSize: 12, fontWeight: 700, color: "#e2e8f0", marginBottom: 8 }}>LLM routing (all agents)</div>
               <p style={{ fontSize: 11, color: "#64748b", margin: "0 0 10px", lineHeight: 1.5 }}>
-                Auto routes to <strong style={{ color: "#93c5fd" }}>AWS Bedrock</strong> first, then falls back to <strong style={{ color: "#93c5fd" }}>Foundry</strong> if Bedrock fails. You can also force a single provider or disable all LLM calls. Saved in this browser.
+                <strong style={{ color: "#93c5fd" }}>Auto</strong> tries <strong>AWS Bedrock</strong>, then <strong>OpenAI</strong>, then <strong>Foundry</strong> (skips any provider you disabled). Each agent sends an <code style={{ color: "#94a3b8" }}>agent</code> label for usage. Saved in this browser.
               </p>
               <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
                 <button
@@ -412,7 +501,7 @@ export default function ConnectorsStatus() {
                     fontFamily: "inherit",
                   }}
                 >
-                  Auto (Bedrock → Foundry)
+                  Auto (Bedrock → OpenAI → Foundry)
                 </button>
                 <button
                   type="button"
@@ -434,6 +523,27 @@ export default function ConnectorsStatus() {
                   }}
                 >
                   Bedrock only
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const next = { ...loadPublishDefaults(), llmProvider: "openai" };
+                    savePublishDefaults(next);
+                    setPublishDefaults(next);
+                  }}
+                  style={{
+                    padding: "8px 14px",
+                    borderRadius: 8,
+                    border: String(publishDefaults.llmProvider || "auto") === "openai" ? "#10b981 1px solid" : "#334155 1px solid",
+                    background: String(publishDefaults.llmProvider || "auto") === "openai" ? "#10b98122" : "#0f172a",
+                    color: String(publishDefaults.llmProvider || "auto") === "openai" ? "#6ee7b7" : "#94a3b8",
+                    fontSize: 12,
+                    fontWeight: 600,
+                    cursor: "pointer",
+                    fontFamily: "inherit",
+                  }}
+                >
+                  OpenAI only
                 </button>
                 <button
                   type="button"
@@ -480,6 +590,8 @@ export default function ConnectorsStatus() {
                 <span style={{ fontSize: 10, color: "#64748b", flex: "1 1 200px" }}>
                   Bedrock: {status.llmBedrockConfigured ? <span style={{ color: "#22c55e" }}>env OK</span> : <span style={{ color: "#f87171" }}>not linked</span>}
                   {" · "}
+                  OpenAI: {status.llmOpenAiConfigured ? <span style={{ color: "#22c55e" }}>env OK</span> : <span style={{ color: "#f87171" }}>not linked</span>}
+                  {" · "}
                   Foundry: {status.llmFoundryConfigured ? <span style={{ color: "#22c55e" }}>env OK</span> : <span style={{ color: "#f87171" }}>not linked</span>}
                 </span>
               </div>
@@ -499,6 +611,18 @@ export default function ConnectorsStatus() {
                 <label style={{ display: "inline-flex", gap: 8, alignItems: "center", fontSize: 11, color: "#94a3b8" }}>
                   <input
                     type="checkbox"
+                    checked={!!publishDefaults.llmDisabled?.openai}
+                    onChange={(e) => {
+                      const next = { ...loadPublishDefaults(), llmDisabled: { ...(loadPublishDefaults().llmDisabled || {}), openai: e.target.checked } };
+                      savePublishDefaults(next);
+                      setPublishDefaults(next);
+                    }}
+                  />
+                  Disable OpenAI
+                </label>
+                <label style={{ display: "inline-flex", gap: 8, alignItems: "center", fontSize: 11, color: "#94a3b8" }}>
+                  <input
+                    type="checkbox"
                     checked={!!publishDefaults.llmDisabled?.foundry}
                     onChange={(e) => {
                       const next = { ...loadPublishDefaults(), llmDisabled: { ...(loadPublishDefaults().llmDisabled || {}), foundry: e.target.checked } };
@@ -508,6 +632,23 @@ export default function ConnectorsStatus() {
                   />
                   Disable Foundry
                 </label>
+              </div>
+              <div style={{ marginTop: 12, paddingTop: 10, borderTop: "1px solid #334155" }}>
+                <div style={{ fontSize: 11, fontWeight: 600, color: "#e2e8f0", marginBottom: 4 }}>OpenAI model (optional)</div>
+                <p style={{ fontSize: 10, color: "#64748b", margin: "0 0 6px", lineHeight: 1.45 }}>
+                  When routing uses OpenAI, this is sent as the chat model (otherwise server uses OPENAI_ROUTING_MODEL / OPENAI_MODEL).
+                </p>
+                <input
+                  type="text"
+                  value={publishDefaults.openaiModel || ""}
+                  onChange={(e) => {
+                    const next = { ...loadPublishDefaults(), openaiModel: e.target.value };
+                    savePublishDefaults(next);
+                    setPublishDefaults(next);
+                  }}
+                  placeholder="e.g. gpt-4o-mini"
+                  style={{ width: "100%", maxWidth: 360, padding: "6px 10px", borderRadius: 8, border: "1px solid #334155", background: "#0f172a", color: "#e2e8f0", fontSize: 12, fontFamily: "inherit" }}
+                />
               </div>
               <div style={{ marginTop: 14, paddingTop: 12, borderTop: "1px solid #334155" }}>
                 <div style={{ fontSize: 11, fontWeight: 600, color: "#e2e8f0", marginBottom: 6 }}>Bedrock model (when AWS is selected)</div>
@@ -544,6 +685,38 @@ export default function ConnectorsStatus() {
                       >
                         {label}
                       </button>
+                    );
+                  })}
+                </div>
+              </div>
+              <div style={{ marginTop: 14, paddingTop: 12, borderTop: "1px solid #334155" }}>
+                <div style={{ fontSize: 11, fontWeight: 600, color: "#e2e8f0", marginBottom: 4 }}>Foundry models (LLM_MODEL per call)</div>
+                <p style={{ fontSize: 10, color: "#64748b", margin: "0 0 8px", lineHeight: 1.45 }}>
+                  When Foundry is used, requests are tried in list order; the first model that succeeds wins. If your catalog uses longer names than the defaults, edit <code style={{ color: "#94a3b8" }}>config/foundry-models.json</code> on the server.
+                </p>
+                <div style={{ maxHeight: 160, overflow: "auto", display: "flex", flexDirection: "column", gap: 4 }}>
+                  {foundryModelRows.map((row) => {
+                    const en = (publishDefaults.foundryModelsEnabled && typeof publishDefaults.foundryModelsEnabled === "object" ? publishDefaults.foundryModelsEnabled : {}) || {};
+                    const on = en[String(row.id)] !== false;
+                    return (
+                      <label
+                        key={row.id}
+                        style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 10, color: "#94a3b8", cursor: "pointer" }}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={on}
+                          onChange={(e) => {
+                            const cur = loadPublishDefaults();
+                            const nextMap = { ...(cur.foundryModelsEnabled && typeof cur.foundryModelsEnabled === "object" ? cur.foundryModelsEnabled : {}) };
+                            nextMap[String(row.id)] = e.target.checked;
+                            const next = { ...cur, foundryModelsEnabled: nextMap };
+                            savePublishDefaults(next);
+                            setPublishDefaults(next);
+                          }}
+                        />
+                        <span style={{ color: "#e2e8f0", fontFamily: "ui-monospace, monospace" }}>{row.llmModel}</span>
+                      </label>
                     );
                   })}
                 </div>

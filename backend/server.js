@@ -19,7 +19,9 @@ import {
   runBedrockReadinessProbe,
   rerunBedrockReadinessProbe,
   bedrockHealth,
+  resolveBedrockModelId,
 } from "./bedrockClient.js";
+import { recordAgentDayUsage, getDailySummary } from "./llmUsageStore.js";
 import {
   markdownToEmailHtml,
   markdownToJiraAdf,
@@ -80,6 +82,9 @@ const LLM_API_KEY = process.env.LLM_KEY_API || process.env.LLM_API_KEY;
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const SCORE_MODEL = process.env.SCORE_MODEL || "gpt-4o";
+/** Default model when routing mode is OpenAI (override with Connector `openaiModel` or request `model`). */
+const OPENAI_ROUTING_MODEL =
+  process.env.OPENAI_ROUTING_MODEL || process.env.OPENAI_MODEL || SCORE_MODEL || "gpt-4o-mini";
 const GEMINI_API_KEY = String(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || "").trim();
 const GEMINI_MODEL = String(process.env.GEMINI_MODEL || "gemini-2.0-flash").trim();
 
@@ -105,6 +110,38 @@ function recordLlmUsageEvent(evt) {
     llmUsageEvents.shift();
   }
 }
+const FOUNDRY_MODELS_JSON = path.join(__dirname, "..", "config", "foundry-models.json");
+function loadFoundryModelsConfig() {
+  try {
+    const raw = fs.readFileSync(FOUNDRY_MODELS_JSON, "utf8");
+    return JSON.parse(raw);
+  } catch {
+    return { models: [] };
+  }
+}
+
+/** OpenAI / Foundry style usage + Bedrock Converse usage */
+function pickUsageTokensFromPayload(obj) {
+  if (!obj || typeof obj !== "object") return { promptTokens: 0, completionTokens: 0 };
+  const u = obj.usage || obj.usage_metadata;
+  if (u && typeof u === "object") {
+    const pt = u.prompt_tokens ?? u.input_tokens ?? u.promptTokens ?? u.inputTokens;
+    const ct = u.completion_tokens ?? u.output_tokens ?? u.completionTokens ?? u.outputTokens;
+    if (pt != null || ct != null) {
+      return { promptTokens: Number(pt) || 0, completionTokens: Number(ct) || 0 };
+    }
+  }
+  const bu = obj.usage;
+  if (bu && typeof bu === "object") {
+    const pt = bu.inputTokens ?? bu.input_tokens;
+    const ct = bu.outputTokens ?? bu.output_tokens;
+    if (pt != null || ct != null) {
+      return { promptTokens: Number(pt) || 0, completionTokens: Number(ct) || 0 };
+    }
+  }
+  return { promptTokens: 0, completionTokens: 0 };
+}
+
 function buildLlmUsageSummary() {
   const cutoff = Date.now() - LLM_USAGE_WINDOW_MS;
   const recent = llmUsageEvents.filter((e) => e.at >= cutoff);
@@ -355,11 +392,17 @@ function parseScoreJsonFromModelOutput(raw) {
   const s = String(raw || "")
     .replace(/```json?\s*|\s*```/g, "")
     .trim();
+  let obj;
   try {
-    return JSON.parse(s);
+    obj = JSON.parse(s);
   } catch {
     return { score: 0, maxScore: 10, rationale: "Could not parse score from model." };
   }
+  let score = Number(obj.score);
+  if (!Number.isFinite(score)) score = 0;
+  score = Math.round(Math.min(10, Math.max(0, score)) * 100) / 100;
+  const rationale = String(obj.rationale || "").trim() || "Could not parse score rationale from model.";
+  return { score, maxScore: 10, rationale };
 }
 
 const JIRA_URL = (process.env.JIRA_URL || "").replace(/\/$/, "");
@@ -514,6 +557,8 @@ function resolveJiraBaseFromIssueKey(issueKey, body) {
 
 /** User-picker custom field id for "Dev Assignee" (or set JIRA_DEV_ASSIGNEE_FIELD_ID= in .env to override). */
 const JIRA_DEV_ASSIGNEE_FIELD_ID = String(process.env.JIRA_DEV_ASSIGNEE_FIELD_ID || "customfield_10236").trim();
+/** Optional user-picker id for "QA Assignee" (set JIRA_QA_ASSIGNEE_FIELD_ID in .env). */
+const JIRA_QA_ASSIGNEE_FIELD_ID = String(process.env.JIRA_QA_ASSIGNEE_FIELD_ID || "").trim();
 /**
  * Multi-user picker fields expect an array: [{ id }]. Single-user picker: one object { id }.
  * @see https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issues/#api-rest-api-3-issue-post
@@ -560,10 +605,55 @@ function extractJiraText(doc) {
   }
 }
 
+/** JIRA user picker / multi-user: display names joined. */
+function jiraUserFieldDisplay(val) {
+  if (val == null) return "";
+  if (Array.isArray(val)) return val.map((v) => jiraUserFieldDisplay(v)).filter(Boolean).join(", ");
+  if (typeof val === "object") {
+    if (val.displayName) return String(val.displayName);
+    if (val.name) return String(val.name);
+    if (val.emailAddress) return String(val.emailAddress);
+  }
+  return "";
+}
+
+const GOOGLE_SHEETS_URL_RE = /https?:\/\/docs\.google\.com\/spreadsheets\/d\/[a-zA-Z0-9-_]+[^\s]*?/gi;
+
+function extractGoogleSheetUrlsFromText(text) {
+  const s = String(text || "");
+  const found = s.match(GOOGLE_SHEETS_URL_RE) || [];
+  const cleaned = [];
+  const seen = new Set();
+  for (let u of found) {
+    u = u.replace(/[),.;]+$/, "");
+    if (seen.has(u)) continue;
+    seen.add(u);
+    cleaned.push(u);
+  }
+  return cleaned;
+}
+
 const app = express();
 
 app.use(cors());
 app.use(express.json({ limit: "10mb" }));
+
+/** Log each /api request (method, path, status, duration). Stdout goes to .claude/main-dev.log when using npm run dev. Disable with PRD_AGENT_HTTP_LOG=0. */
+app.use((req, res, next) => {
+  if (process.env.PRD_AGENT_HTTP_LOG === "0") {
+    return next();
+  }
+  const url = req.originalUrl || req.url || "";
+  if (!url.startsWith("/api")) {
+    return next();
+  }
+  const started = Date.now();
+  res.on("finish", () => {
+    const pathOnly = url.split("?")[0];
+    console.log(`[api] ${req.method} ${pathOnly} ${res.statusCode} +${Date.now() - started}ms`);
+  });
+  next();
+});
 
 app.post("/api/context/knowledge", async (req, res) => {
   try {
@@ -592,18 +682,23 @@ app.post("/api/generate", async (req, res) => {
           ? JSON.stringify(rawUserContent)
           : req.body?.prompt || ""
     ).slice(0, 4000);
+    const skipPreface = req.body?.skipPreface === true;
+    const skipRag = req.body?.skipRag === true;
+
     const prefaceRaw =
       typeof req.body?.prefaceContext === "string" ? req.body.prefaceContext.trim() : "";
-    if (prefaceRaw) {
+    if (!skipPreface && prefaceRaw) {
       incomingSystem =
         (incomingSystem || "") +
         "\n\n[Context from prior sessions and /docs — use only when relevant]\n" +
         prefaceRaw.slice(0, 12000);
     }
-    const ragChunks = await ragRetrieve(userText, 5);
-    if (ragChunks.length > 0) {
-      const ragContext = "\n\n[Reference context from NPCI/UPI/PRD docs – use where relevant]\n" + ragChunks.join("\n\n");
-      incomingSystem = (incomingSystem || "") + ragContext;
+    if (!skipRag) {
+      const ragChunks = await ragRetrieve(userText, 5);
+      if (ragChunks.length > 0) {
+        const ragContext = "\n\n[Reference context from NPCI/UPI/PRD docs – use where relevant]\n" + ragChunks.join("\n\n");
+        incomingSystem = (incomingSystem || "") + ragContext;
+      }
     }
 
     const requested = String(req.body?.llmProvider || process.env.LLM_PROVIDER_DEFAULT || "aws").toLowerCase();
@@ -614,16 +709,44 @@ app.post("/api/generate", async (req, res) => {
         message: "LLM is turned off in Connector Settings.",
       });
     }
+    const agent = String(req.body?.agent || "unknown").slice(0, 40);
     const llmDisabled = req.body?.llmDisabled && typeof req.body.llmDisabled === "object" ? req.body.llmDisabled : {};
     const disableAws = String(llmDisabled.aws || "").toLowerCase() === "true";
     const disableFoundry = String(llmDisabled.foundry || "").toLowerCase() === "true";
+    const disableOpenai = String(llmDisabled.openai || "").toLowerCase() === "true";
     const llmMode =
-      requested === "auto" || requested === "fallback" ? "auto" : requested === "foundry" ? "foundry" : "aws";
+      requested === "auto" || requested === "fallback"
+        ? "auto"
+        : requested === "foundry"
+          ? "foundry"
+          : requested === "openai"
+            ? "openai"
+            : "aws";
     const modelFromBody = typeof req.body?.model === "string" && req.body.model.trim() ? req.body.model.trim() : null;
+    const openaiModelFromConnectors =
+      typeof req.body?.openaiModel === "string" && req.body.openaiModel.trim() ? req.body.openaiModel.trim() : null;
     const bedrockModelTier =
       typeof req.body?.bedrockModelTier === "string" && req.body.bedrockModelTier.trim()
         ? req.body.bedrockModelTier.trim()
         : null;
+
+    function resolveFoundryModelsList() {
+      const en = req.body?.foundryModelsEnabled;
+      const cfg = loadFoundryModelsConfig();
+      const list = [];
+      for (const row of cfg.models || []) {
+        if (!row || row.llmModel == null) continue;
+        const id = String(row.id);
+        const enabled = en == null || typeof en !== "object" ? true : en[id] !== false;
+        if (!enabled) continue;
+        const m = String(row.llmModel).trim();
+        if (m) list.push(m);
+      }
+      if (list.length) return list;
+      if (modelFromBody) return [modelFromBody];
+      if (LLM_MODEL) return [LLM_MODEL];
+      return [SCORE_MODEL || "gpt-4o"];
+    }
 
     const tryAws = async () => {
       if (!isBedrockConfigured()) {
@@ -633,39 +756,125 @@ app.post("/api/generate", async (req, res) => {
         err.code = "BEDROCK_NOT_CONFIGURED";
         throw err;
       }
+      const label = modelFromBody || bedrockModelTier || "sonnet";
       console.log(
         "[api/generate] provider=aws",
         bedrockModelTier ? `tier=${bedrockModelTier}` : "tier(default)",
         modelFromBody ? `model(body)=${modelFromBody}` : ""
       );
-      try {
-        const started = Date.now();
-        const data = await converseBedrock({
-          messages,
-          system: incomingSystem || undefined,
-          maxTokens: incomingMaxTokens,
-          modelId: modelFromBody || undefined,
-          bedrockModelTier,
-        });
-        recordLlmUsageEvent({ provider: "bedrock", ok: true, ms: Date.now() - started });
-        return { provider: "aws", data };
-      } catch (err) {
-        recordLlmUsageEvent({ provider: "bedrock", ok: false, error: err.message || String(err) });
-        console.error("[api/generate] bedrock error:", err.message || err);
-        const e = new Error(err.message || String(err));
-        e.code = "BEDROCK_ERROR";
-        throw e;
+
+      const BEDROCK_ABORT_MAX_RETRIES = 3;
+      const BEDROCK_ABORT_RETRY_BASE_MS = 500;
+      const isAbortError = (err) =>
+        /the operation was aborted/i.test(err?.message || "") ||
+        err?.name === "AbortError" ||
+        err?.code === "ABORT_ERR";
+
+      const resolvedModelId = resolveBedrockModelId({ modelFromBody: modelFromBody || undefined, bedrockModelTier });
+      console.log(
+        "[api/generate] bedrock resolved model:",
+        resolvedModelId,
+        modelFromBody ? `(body requested: ${modelFromBody})` : "(no body model)",
+        bedrockModelTier ? `(tier: ${bedrockModelTier})` : ""
+      );
+
+      let attempt = 0;
+      while (true) {
+        try {
+          const started = Date.now();
+          const data = await converseBedrock({
+            messages,
+            system: incomingSystem || undefined,
+            maxTokens: incomingMaxTokens,
+            modelId: modelFromBody || undefined,
+            bedrockModelTier,
+          });
+          const toks = {
+            promptTokens: Number(data?.usage?.inputTokens) || 0,
+            completionTokens: Number(data?.usage?.outputTokens) || 0,
+          };
+          recordLlmUsageEvent({ provider: "bedrock", ok: true, ms: Date.now() - started, agent, model: label, ...toks });
+          try {
+            recordAgentDayUsage({ agent, provider: "aws", model: String(label), ...toks });
+          } catch (e) {
+            void e;
+          }
+          return { provider: "aws", data, model: label, ...toks };
+        } catch (err) {
+          if (isAbortError(err) && attempt < BEDROCK_ABORT_MAX_RETRIES) {
+            attempt++;
+            const delay = BEDROCK_ABORT_RETRY_BASE_MS * Math.pow(2, attempt - 1);
+            console.warn(
+              `[api/generate] bedrock abort on model=${resolvedModelId}. Retry ${attempt}/${BEDROCK_ABORT_MAX_RETRIES} in ${delay}ms...`
+            );
+            await new Promise((r) => setTimeout(r, delay));
+            continue;
+          }
+          recordLlmUsageEvent({ provider: "bedrock", ok: false, error: err.message || String(err), agent });
+          console.error("[api/generate] bedrock error:", err.message || err);
+          const e = new Error(err.message || String(err));
+          e.code = "BEDROCK_ERROR";
+          throw e;
+        }
       }
     };
 
-    const tryFoundry = async () => {
-      if (!LLM_API_KEY) {
-        const err = new Error("Set LLM_KEY_API (preferred) or LLM_API_KEY in .env for Foundry.");
-        err.code = "MISSING_API_KEY";
+    const tryOpenAi = async () => {
+      if (!OPENAI_API_KEY) {
+        const err = new Error("Set OPENAI_API_KEY in .env for OpenAI routing.");
+        err.code = "OPENAI_NOT_CONFIGURED";
         throw err;
       }
+      const openaiModel = openaiModelFromConnectors || modelFromBody || OPENAI_ROUTING_MODEL;
+      const oaMessages = [];
+      if (incomingSystem) oaMessages.push({ role: "system", content: String(incomingSystem) });
+      for (const m of messages) {
+        const role = m.role === "assistant" ? "assistant" : "user";
+        const c = typeof m.content === "string" ? m.content : JSON.stringify(m.content ?? "");
+        oaMessages.push({ role, content: c });
+      }
+      const started = Date.now();
+      const r = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: openaiModel,
+          messages: oaMessages,
+          max_tokens: Math.min(incomingMaxTokens, 16000),
+          temperature: 0.1,
+        }),
+      });
+      const responseText = await r.text();
+      if (!r.ok) {
+        recordLlmUsageEvent({ provider: "openai", ok: false, ms: Date.now() - started, error: responseText.slice(0, 400), agent });
+        const err = new Error(responseText);
+        err.code = "OPENAI_ERROR";
+        err.httpStatus = r.status;
+        throw err;
+      }
+      let parsed;
+      try {
+        parsed = JSON.parse(responseText);
+      } catch (e) {
+        const err = new Error("Invalid JSON from OpenAI.");
+        err.code = "OPENAI_INVALID_JSON";
+        throw err;
+      }
+      const textOut = String(parsed.choices?.[0]?.message?.content ?? "");
+      const toks = pickUsageTokensFromPayload(parsed);
+      recordLlmUsageEvent({ provider: "openai", ok: true, ms: Date.now() - started, agent, model: openaiModel, ...toks });
+      try {
+        recordAgentDayUsage({ agent, provider: "openai", model: String(openaiModel), ...toks });
+      } catch (e) {
+        void e;
+      }
+      const data = { content: [{ type: "text", text: textOut }] };
+      return { provider: "openai", data, model: openaiModel, ...toks };
+    };
+
+    const tryFoundryOne = async (fm) => {
       const requestBody = {
-        model: modelFromBody || LLM_MODEL,
+        model: fm,
         max_tokens: incomingMaxTokens,
         ...(incomingSystem ? { system: incomingSystem } : {}),
         messages,
@@ -688,8 +897,8 @@ app.post("/api/generate", async (req, res) => {
       }
       const responseText = await response.text();
       if (!response.ok) {
-        recordLlmUsageEvent({ provider: "foundry", ok: false, ms: Date.now() - started, error: `HTTP ${response.status}: ${responseText.slice(0, 300)}` });
-        const err = new Error(responseText);
+        recordLlmUsageEvent({ provider: "foundry", ok: false, ms: Date.now() - started, error: `HTTP ${response.status}: ${responseText.slice(0, 300)}`, agent, model: fm });
+        const err = new Error(`Foundry model ${fm}: ${responseText.slice(0, 500)}`);
         err.code = "LLM_GATEWAY_ERROR";
         err.httpStatus = response.status;
         throw err;
@@ -698,26 +907,85 @@ app.post("/api/generate", async (req, res) => {
       try {
         parsed = JSON.parse(responseText);
       } catch (err) {
-        recordLlmUsageEvent({ provider: "foundry", ok: false, ms: Date.now() - started, error: "INVALID_JSON_FROM_LLM" });
+        recordLlmUsageEvent({ provider: "foundry", ok: false, ms: Date.now() - started, error: "INVALID_JSON_FROM_LLM", agent, model: fm });
         const e = new Error("Invalid JSON from LLM gateway.");
         e.code = "INVALID_JSON_FROM_LLM";
         throw e;
       }
-      recordLlmUsageEvent({ provider: "foundry", ok: true, ms: Date.now() - started });
-      console.log("[api/generate] provider=foundry");
-      return { provider: "foundry", data: parsed };
+      const toks = pickUsageTokensFromPayload(parsed);
+      recordLlmUsageEvent({ provider: "foundry", ok: true, ms: Date.now() - started, agent, model: fm, ...toks });
+      try {
+        recordAgentDayUsage({ agent, provider: "foundry", model: String(fm), ...toks });
+      } catch (e) {
+        void e;
+      }
+      console.log("[api/generate] provider=foundry model=" + fm);
+      return { provider: "foundry", data: parsed, model: fm, ...toks };
+    };
+
+    const tryFoundry = async () => {
+      if (!LLM_API_KEY) {
+        const err = new Error("Set LLM_KEY_API (preferred) or LLM_API_KEY in .env for Foundry.");
+        err.code = "MISSING_API_KEY";
+        throw err;
+      }
+      const modelList = resolveFoundryModelsList();
+      let lastErr = null;
+      const failedModels = [];
+      for (let i = 0; i < modelList.length; i++) {
+        const fm = modelList[i];
+        try {
+          return await tryFoundryOne(fm);
+        } catch (e) {
+          lastErr = e;
+          failedModels.push(fm);
+          const remaining = modelList.length - i - 1;
+          if (remaining > 0) {
+            console.warn(
+              `[api/generate] foundry model ${fm} failed (${e.message?.slice(0, 120)}). Falling back to next model (${remaining} left)...`
+            );
+          } else {
+            console.error(
+              `[api/generate] foundry all ${modelList.length} model(s) exhausted. Tried: [${failedModels.join(", ")}]. Last error: ${e.message?.slice(0, 200)}`
+            );
+          }
+        }
+      }
+      const summary = failedModels.length > 1
+        ? `Foundry: all ${failedModels.length} models failed. Tried: [${failedModels.join(", ")}]. Last error: ${lastErr?.message}`
+        : lastErr?.message || "Foundry: no model succeeded.";
+      const err = new Error(summary);
+      err.code = lastErr?.code || "LLM_GATEWAY_ERROR";
+      throw err;
     };
 
     const order =
-      llmMode === "auto" ? ["aws", "foundry"] : llmMode === "foundry" ? ["foundry"] : ["aws"];
+      llmMode === "auto"
+        ? ["aws", "foundry", "openai"]
+        : llmMode === "foundry"
+          ? ["foundry"]
+          : llmMode === "openai"
+            ? ["openai"]
+            : ["aws"];
     const tried = [];
     let lastErr = null;
     for (const p of order) {
-      if (p === "aws" && disableAws) { tried.push("aws(disabled)"); continue; }
-      if (p === "foundry" && disableFoundry) { tried.push("foundry(disabled)"); continue; }
+      if (p === "aws" && disableAws) {
+        tried.push("aws(disabled)");
+        continue;
+      }
+      if (p === "openai" && disableOpenai) {
+        tried.push("openai(disabled)");
+        continue;
+      }
+      if (p === "foundry" && disableFoundry) {
+        tried.push("foundry(disabled)");
+        continue;
+      }
       try {
-        const result = p === "aws" ? await tryAws() : await tryFoundry();
-        return res.json({ success: true, data: result.data, llmProvider: result.provider, llmTried: tried });
+        const result = p === "aws" ? await tryAws() : p === "openai" ? await tryOpenAi() : await tryFoundry();
+        const llmModel = result.model || (result.provider === "aws" ? modelFromBody || bedrockModelTier || "default" : "default");
+        return res.json({ success: true, data: result.data, llmProvider: result.provider, llmTried: tried, llmModel });
       } catch (e) {
         tried.push(p);
         lastErr = e;
@@ -914,11 +1182,31 @@ app.post("/api/extract-context-file", upload.single("file"), async (req, res) =>
   }
 });
 
+app.get("/api/foundry-models", (req, res) => {
+  try {
+    const cfg = loadFoundryModelsConfig();
+    res.json({ success: true, models: cfg.models || [] });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+app.get("/api/llm-usage-daily", (req, res) => {
+  try {
+    const daysBack = Math.min(31, Math.max(1, Number(req.query.days) || 8));
+    const summary = getDailySummary(daysBack);
+    res.json({ success: true, days: summary, inMemory24hByProvider: buildLlmUsageSummary() });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
 app.get("/api/connectors/status", (req, res) => {
   const sites = listConfiguredJiraBases();
   res.json({
     llmBedrockConfigured: isBedrockConfigured(),
     llmFoundryConfigured: !!(LLM_API_KEY && LLM_URL),
+    llmOpenAiConfigured: !!OPENAI_API_KEY,
     llmProviders: buildLlmProvidersPayload(),
     jira: !!(JIRA_EMAIL && JIRA_TOKEN && sites.length > 0),
     jiraSites: sites,
@@ -982,16 +1270,33 @@ function jiraSiteLabelForBase(base) {
 
 function formatJiraIssueApiResponse(d, jiraBaseUrl) {
   const f = d.fields || {};
-  const comments = (f.comment?.comments || []).slice(-3).map((c) => `[${c.author?.displayName}]: ${extractJiraText(c.body)}`).join("\n");
+  const commentList = f.comment?.comments || [];
+  const comments = commentList
+    .slice(-3)
+    .map((c) => `[${c.author?.displayName}]: ${extractJiraText(c.body)}`)
+    .join("\n");
+  const allCommentsText = commentList.map((c) => extractJiraText(c.body)).join("\n");
+  const statusName = f.status?.name || "";
+  const inUat = /^in\s*uat$/i.test(String(statusName).trim());
+  const haystackForSheets = [allCommentsText, extractJiraText(f.description)].filter(Boolean).join("\n");
+  const qaTestCaseSheetUrls = inUat ? extractGoogleSheetUrlsFromText(haystackForSheets) : [];
+
+  const assigneeName = f.assignee?.displayName || "Unassigned";
+  const devFromCf = JIRA_DEV_ASSIGNEE_FIELD_ID ? jiraUserFieldDisplay(f[JIRA_DEV_ASSIGNEE_FIELD_ID]) : "";
+  const devAssignee = devFromCf || assigneeName;
+  const qaAssignee = JIRA_QA_ASSIGNEE_FIELD_ID ? jiraUserFieldDisplay(f[JIRA_QA_ASSIGNEE_FIELD_ID]) : "";
+
   return {
     id: d.key,
     jiraBaseUrl: jiraBaseUrl || "",
     jiraSite: jiraSiteLabelForBase(jiraBaseUrl),
     summary: f.summary || "",
     description: extractJiraText(f.description),
-    status: f.status?.name || "",
+    status: statusName,
     priority: f.priority?.name || "",
-    assignee: f.assignee?.displayName || "Unassigned",
+    assignee: assigneeName,
+    devAssignee,
+    qaAssignee: qaAssignee || "",
     reporter: f.reporter?.displayName || "",
     created: (f.created || "").split("T")[0] || "",
     updated: (f.updated || "").split("T")[0] || "",
@@ -1000,7 +1305,14 @@ function formatJiraIssueApiResponse(d, jiraBaseUrl) {
     fixVersions: (f.fixVersions || []).map((v) => v.name).join(", "),
     acceptanceCriteria: f.customfield_10023 || f.customfield_10034 || "",
     comments,
+    qaTestCaseSheetUrls,
     attachments: (f.attachment || []).map((a) => a.filename).join(", "),
+    attachmentItems: (f.attachment || [])
+      .map((a) => ({
+        filename: String(a.filename || "attachment").trim() || "attachment",
+        url: String(a.content || a.url || "").trim(),
+      }))
+      .filter((x) => x.url),
   };
 }
 
@@ -1943,7 +2255,7 @@ app.post("/api/score", async (req, res) => {
     const provider = String(scoreProvider || "openai").toLowerCase() === "foundry" ? "foundry" : "openai";
     const docType =
       type === "uat" ? "UAT Signoff" : type === "brd" ? "BRD" : type === "jira" ? "JIRA ticket" : "PRD";
-    const systemPrompt = `You are an expert reviewer. Score the following ${docType} document on a scale of 1-10 (10 = excellent). Consider: completeness, clarity, compliance with NPCI/UPI norms, structure, and actionability. Respond with ONLY a JSON object: { "score": number, "maxScore": 10, "rationale": "2-3 sentence explanation" }. No other text.`;
+    const systemPrompt = `You are an expert reviewer. Score the following ${docType} document on a scale of 1-10 (10 = excellent). Consider: completeness, clarity, compliance with NPCI/UPI norms, structure, and actionability. Use a score with two decimal places when appropriate (e.g. 9.05). Respond with ONLY a JSON object: { "score": number, "maxScore": 10, "rationale": "2-4 sentence explanation" }. No other text.`;
     const userContent = (title ? `Document: ${title}\n\n` : "") + String(content).slice(0, 12000);
     const combinedUserMessage = `${systemPrompt}\n\n${userContent}`;
 

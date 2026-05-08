@@ -1,0 +1,29 @@
+{
+  "models": [
+    { "id": "0",  "name": "GPT-5",                        "llmModel": "ocl-vmg/vm-gpt-5" },
+    { "id": "1",  "name": "GPT-5.1",                      "llmModel": "ocl-vmg/vm-gpt-5-1" },
+    { "id": "2",  "name": "Paytm GPT-4o Mini",            "llmModel": "ocl-vmg/vm-paytm-gpt-4o-mini" },
+    { "id": "3",  "name": "Claude Sonnet 4.5",            "llmModel": "ocl-vmg/vm-claude-sonnet-4-5" },
+    { "id": "4",  "name": "Claude Opus 4.5",              "llmModel": "ocl-vmg/vm-claude-opus-4-5" },
+    { "id": "5",  "name": "Gemini 3.1 Pro",               "llmModel": "ocl-vmg/vm-gemini-3-1-pro" },
+    { "id": "6",  "name": "Gemini 3 Flash",               "llmModel": "ocl-vmg/vm-gemini-3-flash" },
+    { "id": "7",  "name": "Llama 3.3 70B",                "llmModel": "ocl-vmg/vm-llama-3-3-70b" },
+    { "id": "8",  "name": "Llama 3.3 70B Chat",           "llmModel": "ocl-vmg/vm-llama-3-3-70b-chat" },
+    { "id": "9",  "name": "Llama 3.3 70B Eval",           "llmModel": "ocl-vmg/vm-llama-3-3-70b-eval" },
+    { "id": "10", "name": "Llama 4 16E Instruct",         "llmModel": "ocl-vmg/vm-llama-4-16e-instruc" },
+    { "id": "11", "name": "DeepSeek R1 Distill Llama 70B","llmModel": "ocl-vmg/vm-deepseek-r1-distill-llama-70b" },
+    { "id": "12", "name": "GPT-OSS 120B DeepSeek R1",     "llmModel": "ocl-vmg/vm-gptoss-120b-deepseek-r1" },
+    { "id": "13", "name": "GPT-OSS 120B",                 "llmModel": "ocl-vmg/vm-gpt-oss-120b" },
+    { "id": "14", "name": "Claude Opus 4.6",              "llmModel": "ocl-vmg/vm-claude-opus-4-6" },
+    { "id": "15", "name": "Gemini 2.5 Pro",               "llmModel": "ocl-vmg/vm-gemini-2-5-pro" },
+    { "id": "16", "name": "Gemini 2.5 Flash",             "llmModel": "ocl-vmg/vm-gemini-2-5-flash" },
+    { "id": "17", "name": "Gemini 2.5 Flash Lite",        "llmModel": "ocl-vmg/vm-gemini-2-5-flash-lite" },
+    { "id": "18", "name": "Paytm CST GPT-4o",             "llmModel": "ocl-vmg/vm-paytm-cst-gpt-4o" },
+    { "id": "19", "name": "Gemma 3 27B IT",               "llmModel": "ocl-vmg/vm-gemma-3-27b-it" },
+    { "id": "20", "name": "GPT-OSS 20B",                  "llmModel": "ocl-vmg/vm-gpt-oss-20b" },
+    { "id": "21", "name": "Paytm Vijil LoRA",             "llmModel": "ocl-vmg/vm-paytm-vijil-lora" },
+    { "id": "22", "name": "Paytm CST GPT-4.1",            "llmModel": "ocl-vmg/vm-paytm-cst-gpt-4-1" },
+    { "id": "23", "name": "Paytm CST O3",                 "llmModel": "ocl-vmg/vm-paytm-cst-o3" }
+  ],
+  "note": "Models listed in priority order: id 0 (ocl-vmg/vm-gpt-5) is highest priority, id 23 (ocl-vmg/vm-paytm-cst-o3) is lowest. Foundry tries each in order and falls back to the next on failure."
+}

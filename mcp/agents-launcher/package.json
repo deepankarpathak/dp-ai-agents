@@ -1,0 +1,21 @@
+{
+  "name": "agents-launcher",
+  "version": "1.0.0",
+  "private": true,
+  "description": "MCP tools to start PRD-agent local dev stacks from Claude",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^3.25.76"
+  }
+}
