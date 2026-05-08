@@ -30,6 +30,7 @@
 .env.production.local
 *.key
 *.pem
+*.log
 # Local MCP secrets (never copy into repo)
 **/mcp-secrets.env
 
@@ -53,3 +54,4 @@ server copy.js
 /src/uat-agent1 copy.jsx
 /src/prd-agent-v7 copy.jsx
 /src/uat-agent1 copy 2.jsx
+/claude/worktrees/
