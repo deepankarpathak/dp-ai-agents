@@ -670,6 +670,7 @@ app.post("/api/context/knowledge", async (req, res) => {
 
 app.post("/api/generate", async (req, res) => {
   try {
+    const startedAt = Date.now();
     const incomingMessages = Array.isArray(req.body?.messages) ? req.body.messages : null;
     let incomingSystem = typeof req.body?.system === "string" ? req.body.system : null;
     const incomingMaxTokens = typeof req.body?.max_tokens === "number" ? req.body.max_tokens : 8000;
@@ -758,7 +759,7 @@ app.post("/api/generate", async (req, res) => {
       }
       const label = modelFromBody || bedrockModelTier || "sonnet";
       console.log(
-        "[api/generate] provider=aws",
+        `[${new Date().toISOString()}] [api/generate] provider=aws`,
         bedrockModelTier ? `tier=${bedrockModelTier}` : "tier(default)",
         modelFromBody ? `model(body)=${modelFromBody}` : ""
       );
@@ -919,7 +920,7 @@ app.post("/api/generate", async (req, res) => {
       } catch (e) {
         void e;
       }
-      console.log("[api/generate] provider=foundry model=" + fm);
+      console.log(`[${new Date().toISOString()}] [api/generate] provider=foundry model=` + fm);
       return { provider: "foundry", data: parsed, model: fm, ...toks };
     };
 
@@ -985,6 +986,7 @@ app.post("/api/generate", async (req, res) => {
       try {
         const result = p === "aws" ? await tryAws() : p === "openai" ? await tryOpenAi() : await tryFoundry();
         const llmModel = result.model || (result.provider === "aws" ? modelFromBody || bedrockModelTier || "default" : "default");
+        console.log(`[${new Date().toISOString()}] [api/generate] ✓ provider=${result.provider} model=${llmModel} ms=${Date.now() - startedAt}`);
         return res.json({ success: true, data: result.data, llmProvider: result.provider, llmTried: tried, llmModel });
       } catch (e) {
         tried.push(p);
@@ -1022,7 +1024,7 @@ app.post("/api/claude", async (req, res) => {
           error: { message: "AWS Bedrock not configured — see .env.example (HTTP gateway or native SDK vars)." },
         });
       }
-      console.log("[api/claude] provider=aws", bedrockModelTier ? `tier=${bedrockModelTier}` : "");
+      console.log(`[${new Date().toISOString()}] [api/claude] provider=aws`, bedrockModelTier ? `tier=${bedrockModelTier}` : "");
       const data = await converseBedrock({
         messages,
         system: incomingSystem || undefined,
@@ -1058,11 +1060,119 @@ app.post("/api/claude", async (req, res) => {
       return res.status(response.status).json({ error: { message: responseText } });
     }
     const parsed = JSON.parse(responseText);
-    console.log("[api/claude] provider=foundry");
+    console.log(`[${new Date().toISOString()}] [api/claude] provider=foundry`);
     res.json(parsed);
   } catch (err) {
     console.error("BRD /api/claude error:", err);
     res.status(500).json({ error: { message: err.message } });
+  }
+});
+
+const ALPHA_ROOT = "/Users/deepankarpathak/Library/CloudStorage/GoogleDrive-deepankar.pathak@finmate.tech/.shortcut-targets-by-id/1QdRXLOJP1KCTJVfFeL4tuFyIC3GY0pbh/UPI Alpha";
+
+app.post("/api/alpha/chat", async (req, res) => {
+  const alphaStarted = Date.now();
+  try {
+    const message = String(req.body?.message || "").trim();
+    const history = Array.isArray(req.body?.history) ? req.body.history : [];
+    if (!message) return res.status(400).json({ success: false, error: "message required" });
+
+    const readSafe = async (p, maxChars = 0) => {
+      try {
+        const txt = await fs.promises.readFile(p, "utf8");
+        return maxChars ? txt.slice(0, maxChars) : txt;
+      } catch { return ""; }
+    };
+
+    const [soul, claudeMd, products, index] = await Promise.all([
+      readSafe(`${ALPHA_ROOT}/SOUL.md`),
+      readSafe(`${ALPHA_ROOT}/CLAUDE.md`, 2000),
+      readSafe(`${ALPHA_ROOT}/PRODUCTS.md`),
+      readSafe(`${ALPHA_ROOT}/INDEX.md`, 3000),
+    ]);
+
+    const wikiDir = `${ALPHA_ROOT}/wiki`;
+    const filesUsed = [];
+    let wikiContext = "";
+    try {
+      const tokens = message.toLowerCase().split(/[^a-z0-9_]+/).filter(t => t.length >= 3);
+      async function walkMd(dir) {
+        const entries = await fs.promises.readdir(dir, { withFileTypes: true });
+        const results = [];
+        for (const e of entries) {
+          const full = path.join(dir, e.name);
+          if (e.isDirectory()) results.push(...(await walkMd(full)));
+          else if (/\.md$/i.test(e.name)) results.push(full);
+        }
+        return results;
+      }
+      const mdFiles = await walkMd(wikiDir);
+      const scored = [];
+      for (const f of mdFiles) {
+        const txt = await readSafe(f, 6000);
+        const lower = txt.toLowerCase();
+        let score = 0;
+        for (const t of tokens) if (lower.includes(t)) score += t.length > 6 ? 3 : 1;
+        if (score > 0) scored.push({ f, txt, score });
+      }
+      scored.sort((a, b) => b.score - a.score);
+      const top4 = scored.slice(0, 4);
+      wikiContext = top4.map(x => `### ${path.relative(wikiDir, x.f)}\n${x.txt.slice(0, 3000)}`).join("\n\n---\n\n");
+      filesUsed.push(...top4.map(x => path.relative(ALPHA_ROOT, x.f)));
+    } catch (e) {
+      console.warn("[api/alpha/chat] wiki search error:", e.message);
+    }
+
+    const systemPrompt = [
+      "You are Alpha Agent — the embedded PM brain of the Paytm UPI product team.",
+      soul ? `\n[SOUL]\n${soul}` : "",
+      claudeMd ? `\n[OPERATING INSTRUCTIONS]\n${claudeMd}` : "",
+      products ? `\n[PRODUCTS IN SCOPE]\n${products}` : "",
+      index ? `\n[WIKI INDEX]\n${index}` : "",
+      wikiContext ? `\n[RELEVANT WIKI CONTEXT]\n${wikiContext}` : "",
+    ].filter(Boolean).join("\n");
+
+    const messages = [
+      ...history.filter(m => m.role && m.content).map(m => ({ role: m.role, content: String(m.content) })),
+      { role: "user", content: message },
+    ];
+
+    const requested = String(req.body?.llmProvider || process.env.LLM_PROVIDER_DEFAULT || "aws").toLowerCase();
+    let reply = "";
+    let llmProvider = requested;
+
+    if (requested !== "foundry" && requested !== "openai" && isBedrockConfigured()) {
+      const data = await converseBedrock({ messages, system: systemPrompt, maxTokens: 4000 });
+      reply = data?.content?.[0]?.text || JSON.stringify(data);
+      llmProvider = "aws";
+    } else if (requested === "openai" && OPENAI_API_KEY) {
+      const r = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_API_KEY}` },
+        body: JSON.stringify({ model: process.env.OPENAI_MODEL || "gpt-4.1-mini", max_tokens: 4000, messages: [{ role: "system", content: systemPrompt }, ...messages] }),
+      });
+      const j = await r.json();
+      reply = j.choices?.[0]?.message?.content || JSON.stringify(j);
+      llmProvider = "openai";
+    } else if (LLM_API_KEY && LLM_URL) {
+      const r = await fetch(LLM_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-api-key": LLM_API_KEY },
+        body: JSON.stringify({ model: LLM_MODEL, max_tokens: 4000, system: systemPrompt, messages }),
+      });
+      const j = await r.json();
+      reply = j?.content?.[0]?.text || JSON.stringify(j);
+      llmProvider = "foundry";
+    } else {
+      return res.status(503).json({ success: false, error: "No LLM provider configured" });
+    }
+
+    const ms = Date.now() - alphaStarted;
+    console.log(`[${new Date().toISOString()}] [alpha] ✓ provider=${llmProvider} ms=${ms} filesUsed=${filesUsed.length}`);
+    return res.json({ success: true, reply, filesUsed, llmProvider, ms });
+  } catch (err) {
+    console.error(`[${new Date().toISOString()}] [alpha] ERROR:`, err.message);
+    return res.status(500).json({ success: false, error: err.message });
   }
 });
 

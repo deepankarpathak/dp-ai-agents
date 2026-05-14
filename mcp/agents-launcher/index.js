@@ -157,6 +157,33 @@ async function startAnalystStack(root) {
   return { ok: true, started: true, pid, repoRoot: root, logFile };
 }
 
+const MCP_HOME = process.env.MCP_HOME?.trim() || "/Users/deepankarpathak/dev/mcp";
+const MCP_SERVERS = [
+  { name: "kb-mcp-server",          cmd: "node",    args: [`${MCP_HOME}/kb-mcp-server/src/index.js`],          log: "mcp-kb.log" },
+  { name: "redash-mcp",             cmd: "node",    args: [`${MCP_HOME}/redash-mcp/dist/cli.js`],               log: "mcp-redash.log" },
+  { name: "mcp-server-prometheus",  cmd: "node",    args: [`${MCP_HOME}/mcp-server-prometheus/build/index.js`], log: "mcp-prometheus.log" },
+  { name: "superset-mcp",           cmd: `${MCP_HOME}/superset-mcp/venv/bin/python`, args: [`${MCP_HOME}/superset-mcp/main.py`], log: "mcp-superset.log" },
+];
+
+async function startMcps(root) {
+  const logDir = ensureLogDir(root);
+  const results = [];
+  for (const srv of MCP_SERVERS) {
+    const logFile = path.join(logDir, srv.log);
+    appendSpawnBanner(logFile, `${srv.cmd} ${srv.args.join(" ")}`);
+    const logFd = fs.openSync(logFile, "a");
+    const child = spawn(srv.cmd, srv.args, {
+      detached: true,
+      stdio: ["ignore", logFd, logFd],
+      env: { ...process.env },
+    });
+    try { fs.closeSync(logFd); } catch { /* ignore */ }
+    child.unref();
+    results.push({ name: srv.name, pid: child.pid, logFile });
+  }
+  return results;
+}
+
 const server = new McpServer({
   name: "prd-agent-launcher",
   version: "1.0.0",
@@ -169,6 +196,7 @@ server.tool(
     const root = resolveRepoRoot();
     const main = await startMainStack(root);
     const analyst = await startAnalystStack(root);
+    const mcpServers = await startMcps(root);
     const mainUrl = process.env.PRD_AGENT_MAIN_URL?.trim() || "http://localhost:3000";
     const analystUrl = process.env.REACT_APP_ANALYST_AGENT_URL?.trim() || "http://localhost:3040";
 
@@ -181,12 +209,15 @@ server.tool(
       ok: analyst.ok !== false && main.ok !== false,
       mainStack: main,
       analystStack: analyst,
+      mcpServers,
       browserOpened: [mainUrl, analystUrl],
       terminal,
       tips: [
         "Wait a few seconds for dev servers to bind ports; refresh browser if needed.",
         "API traffic: lines prefixed [api] (Express) and [analyst-api] (Next) appear in the tail window / log files.",
         "Disable HTTP request logs: PRD_AGENT_HTTP_LOG=0 on backend env or Query_Agent.",
+        "Alpha Agent is the α tab in the main UI at http://localhost:3000",
+        "MCP server logs: .claude/mcp-kb.log, mcp-redash.log, mcp-prometheus.log, mcp-superset.log",
       ],
     };
 
@@ -256,9 +287,25 @@ server.tool(
       mainApi: { port: 5000, listening: p5000 },
       analystNext: { port: 3040, listening: p3040 },
       repoRoot: resolveRepoRoot(),
+      mcpServers: MCP_SERVERS.map(s => {
+        const logFile = path.join(ensureLogDir(resolveRepoRoot()), s.log);
+        return { name: s.name, logFile, logExists: fs.existsSync(logFile) };
+      }),
     };
     return {
       content: [{ type: "text", text: JSON.stringify(body, null, 2) }],
+    };
+  },
+);
+
+server.tool(
+  "start_mcps",
+  "Start all external MCP servers (kb-mcp-server, redash-mcp, mcp-server-prometheus, superset-mcp) in background. Logs to .claude/mcp-*.log in the repo root.",
+  async () => {
+    const root = resolveRepoRoot();
+    const results = await startMcps(root);
+    return {
+      content: [{ type: "text", text: JSON.stringify({ ok: true, mcpServers: results }, null, 2) }],
     };
   },
 );

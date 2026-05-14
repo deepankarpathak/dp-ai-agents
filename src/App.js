@@ -4,6 +4,7 @@ import TestSentinel from "./uat-agent1.jsx";
 import BRDAgent from "./brd-agent.jsx";
 import JiraAgent from "./jira-agent.jsx";
 import AnalystAgentTab from "./analyst-agent.jsx";
+import AlphaAgent from "./alpha-agent.jsx";
 import ConnectorsStatus from "./ConnectorsStatus.jsx";
 import BackendWarningBanner from "./BackendWarningBanner.jsx";
 
@@ -12,6 +13,7 @@ const TAB_UAT = "uat";
 const TAB_BRD = "brd";
 const TAB_JIRA = "jira";
 const TAB_ANALYST = "analyst";
+const TAB_ALPHA = "alpha";
 
 function App() {
   const [activeTab, setActiveTab] = useState(TAB_PRD);
@@ -118,6 +120,24 @@ function App() {
           Analyst Agent
         </button>
 
+        <button
+          type="button"
+          onClick={() => setActiveTab(TAB_ALPHA)}
+          style={{
+            padding: "8px 20px",
+            margin: 0,
+            border: "none",
+            borderBottom: activeTab === TAB_ALPHA ? "2px solid #10b981" : "2px solid transparent",
+            background: activeTab === TAB_ALPHA ? "#1e293b" : "transparent",
+            color: activeTab === TAB_ALPHA ? "#f8fafc" : "#64748b",
+            fontSize: 13,
+            fontWeight: 600,
+            cursor: "pointer",
+          }}
+        >
+          α Alpha Agent
+        </button>
+
         {/* Connectors status — shared across all agents */}
         <div style={{ marginLeft: "auto" }}>
           <ConnectorsStatus />
@@ -140,6 +160,9 @@ function App() {
       </div>
       <div style={{ flex: 1, display: activeTab === TAB_ANALYST ? "block" : "none" }}>
         <AnalystAgentTab />
+      </div>
+      <div style={{ flex: 1, display: activeTab === TAB_ALPHA ? "block" : "none" }}>
+        <AlphaAgent />
       </div>
     </div>
   );
